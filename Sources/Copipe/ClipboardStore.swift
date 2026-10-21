@@ -5,9 +5,15 @@ import CryptoKit
 @MainActor
 final class ClipboardStore: ObservableObject {
     @Published private(set) var items: [ClipItem] = []
-    @Published var isPaused = false
+    /// この日時まで記録を止める（distantFuture なら再開するまで）
+    @Published private(set) var pausedUntil: Date?
 
-    let maxItems = 500
+    var isPaused: Bool { (pausedUntil ?? .distantPast) > Date() }
+
+    /// 保存期間に関係なく、これを超えた古い履歴は消す（ピン留めは除く）
+    let maxItems = 2000
+    /// これより大きいクリップボードは丸ごとは保存しない
+    private let maxRawSize = 50_000_000
 
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var timer: Timer?
@@ -15,6 +21,7 @@ final class ClipboardStore: ObservableObject {
 
     private let baseDir: URL
     private let imagesDir: URL
+    private let rawDir: URL
     private let historyURL: URL
 
     /// パスワード管理アプリなどが「記録しないで」と付けてくる型
@@ -29,9 +36,12 @@ final class ClipboardStore: ObservableObject {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         baseDir = support.appendingPathComponent("Copipe", isDirectory: true)
         imagesDir = baseDir.appendingPathComponent("images", isDirectory: true)
+        rawDir = baseDir.appendingPathComponent("raw", isDirectory: true)
         historyURL = baseDir.appendingPathComponent("history.json")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: rawDir, withIntermediateDirectories: true)
         load()
+        trim()
     }
 
     func start() {
@@ -52,30 +62,53 @@ final class ClipboardStore: ObservableObject {
         if types.contains(where: { Self.ignoredTypes.contains($0.rawValue) }) { return }
 
         let front = NSWorkspace.shared.frontmostApplication
-        let appName = front?.localizedName
-        let bundleID = front?.bundleIdentifier
+        let source = (appName: front?.localizedName, bundleID: front?.bundleIdentifier)
+        let raw = captureRaw(pb)
 
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
             let paths = urls.map(\.path)
-            add(kind: .file, filePaths: paths, signature: "f:" + paths.joined(separator: "\n"),
-                appName: appName, bundleID: bundleID)
+            add(kind: .file, filePaths: paths, signature: "f:" + paths.joined(separator: "\n"), raw: raw, source: source)
         } else if let string = pb.string(forType: .string),
                   !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard string.utf8.count < 2_000_000 else { return }
             let kind: ClipKind = Self.isLink(string) ? .link : .text
-            add(kind: kind, text: string, signature: "t:" + string, appName: appName, bundleID: bundleID)
+            add(kind: kind, text: string, signature: "t:" + string, raw: raw, source: source)
         } else if let image = NSImage(pasteboard: pb), let png = image.pngData() {
-            let hash = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
-            let signature = "i:" + hash
+            let signature = "i:" + Self.hash(png)
             if items.contains(where: { $0.signature == signature }) {
-                add(kind: .image, signature: signature, appName: appName, bundleID: bundleID)
+                add(kind: .image, signature: signature, raw: raw, source: source)
             } else {
-                let name = hash + ".png"
+                let name = Self.hash(png) + ".png"
                 try? png.write(to: imagesDir.appendingPathComponent(name))
-                add(kind: .image, imageName: name, signature: signature, appName: appName, bundleID: bundleID)
+                add(kind: .image, imageName: name, signature: signature, raw: raw, source: source)
             }
+        } else if let raw {
+            // 文字や画像として読めないアプリ独自のデータ（Final Cut Pro・Filmora の素材など）
+            var all = Data()
+            for entry in raw.items.joined() { all.append(entry.data) }
+            add(kind: .other, signature: "r:" + Self.hash(all), raw: raw, source: source)
         }
+    }
+
+    private func captureRaw(_ pb: NSPasteboard) -> RawPasteboard? {
+        var items: [[RawPasteboard.Entry]] = []
+        var total = 0
+        for item in pb.pasteboardItems ?? [] {
+            var entries: [RawPasteboard.Entry] = []
+            for type in item.types where !type.rawValue.contains("promised") {
+                guard let data = item.data(forType: type) else { continue }
+                total += data.count
+                if total > maxRawSize { return nil }
+                entries.append(.init(type: type.rawValue, data: data))
+            }
+            if !entries.isEmpty { items.append(entries) }
+        }
+        return items.isEmpty ? nil : RawPasteboard(items: items)
+    }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func isLink(_ s: String) -> Bool {
@@ -85,17 +118,24 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func add(kind: ClipKind, text: String? = nil, imageName: String? = nil, filePaths: [String]? = nil,
-                     signature: String, appName: String?, bundleID: String?) {
+                     signature: String, raw: RawPasteboard?, source: (appName: String?, bundleID: String?)) {
         if let idx = items.firstIndex(where: { $0.signature == signature }) {
-            // 既にある内容なら先頭に移動するだけ
+            // 既にある内容なら先頭に移動して、丸ごとのデータだけ新しいものに差し替える
             var existing = items.remove(at: idx)
             existing.date = Date()
-            existing.sourceAppName = appName
-            existing.sourceBundleID = bundleID
+            existing.sourceAppName = source.appName
+            existing.sourceBundleID = source.bundleID
+            if let raw {
+                removeRawFile(of: existing)
+                existing.rawName = saveRaw(raw)
+                existing.rawSize = raw.totalSize
+            }
             items.insert(existing, at: 0)
         } else {
             let item = ClipItem(id: UUID(), kind: kind, text: text, imageName: imageName, filePaths: filePaths,
-                                sourceAppName: appName, sourceBundleID: bundleID, date: Date(), signature: signature)
+                                rawName: raw.flatMap(saveRaw), rawSize: raw?.totalSize,
+                                sourceAppName: source.appName, sourceBundleID: source.bundleID,
+                                date: Date(), signature: signature)
             items.insert(item, at: 0)
             trim()
         }
@@ -104,11 +144,12 @@ final class ClipboardStore: ObservableObject {
 
     private func trim() {
         var unpinned = 0
+        let limit = Retention.current.days.map { Date().addingTimeInterval(-Double($0) * 86_400) }
         items.removeAll { item in
             guard !item.pinned else { return false }
             unpinned += 1
-            if unpinned > maxItems {
-                removeImageFile(of: item)
+            if unpinned > maxItems || (limit.map { item.date < $0 } ?? false) {
+                removeFiles(of: item)
                 return true
             }
             return false
@@ -117,10 +158,45 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: - 操作
 
+    func pause(for interval: TimeInterval?) {
+        pausedUntil = interval.map { Date().addingTimeInterval($0) } ?? .distantFuture
+    }
+
+    func resume() {
+        pausedUntil = nil
+    }
+
+    func setRetention(_ retention: Retention) {
+        Retention.current = retention
+        trim()
+        save()
+    }
+
+    /// 「新しいテキストアイテム」で入力した文字を履歴に入れる
+    func addManualText(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        add(kind: .text, text: text, signature: "t:" + text, raw: nil,
+            source: (appName: "Copipe", bundleID: Bundle.main.bundleIdentifier))
+    }
+
     /// 履歴の項目をクリップボードに戻す（自分自身の書き込みは記録しない）
-    func copyToPasteboard(_ item: ClipItem) {
+    /// plainText が true なら書式を外して文字だけにする
+    func copyToPasteboard(_ item: ClipItem, plainText: Bool = false) {
         let pb = NSPasteboard.general
         pb.clearContents()
+        if let raw = loadRaw(of: item), !(plainText && item.text != nil) {
+            // コピーしたときのデータを全形式そのまま戻す
+            pb.writeObjects(raw.items.map { entries in
+                let pasteboardItem = NSPasteboardItem()
+                for entry in entries {
+                    pasteboardItem.setData(entry.data, forType: NSPasteboard.PasteboardType(entry.type))
+                }
+                return pasteboardItem
+            })
+            lastChangeCount = pb.changeCount
+            moveToTop(item)
+            return
+        }
         switch item.kind {
         case .text, .link:
             pb.setString(item.text ?? "", forType: .string)
@@ -129,6 +205,8 @@ final class ClipboardStore: ObservableObject {
         case .file:
             let urls = (item.filePaths ?? []).map { NSURL(fileURLWithPath: $0) }
             pb.writeObjects(urls)
+        case .other:
+            break
         }
         lastChangeCount = pb.changeCount
         moveToTop(item)
@@ -150,12 +228,12 @@ final class ClipboardStore: ObservableObject {
 
     func delete(_ item: ClipItem) {
         items.removeAll { $0.id == item.id }
-        removeImageFile(of: item)
+        removeFiles(of: item)
         save()
     }
 
     func clearUnpinned() {
-        for item in items where !item.pinned { removeImageFile(of: item) }
+        for item in items where !item.pinned { removeFiles(of: item) }
         items.removeAll { !$0.pinned }
         save()
     }
@@ -166,6 +244,31 @@ final class ClipboardStore: ObservableObject {
         guard let image = NSImage(contentsOf: imagesDir.appendingPathComponent(name)) else { return nil }
         imageCache.setObject(image, forKey: name as NSString)
         return image
+    }
+
+    private func saveRaw(_ raw: RawPasteboard) -> String? {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let data = try? encoder.encode(raw) else { return nil }
+        let name = UUID().uuidString + ".plist"
+        guard (try? data.write(to: rawDir.appendingPathComponent(name))) != nil else { return nil }
+        return name
+    }
+
+    private func loadRaw(of item: ClipItem) -> RawPasteboard? {
+        guard let name = item.rawName,
+              let data = try? Data(contentsOf: rawDir.appendingPathComponent(name)) else { return nil }
+        return try? PropertyListDecoder().decode(RawPasteboard.self, from: data)
+    }
+
+    private func removeFiles(of item: ClipItem) {
+        removeImageFile(of: item)
+        removeRawFile(of: item)
+    }
+
+    private func removeRawFile(of item: ClipItem) {
+        guard let name = item.rawName else { return }
+        try? FileManager.default.removeItem(at: rawDir.appendingPathComponent(name))
     }
 
     private func removeImageFile(of item: ClipItem) {
@@ -201,5 +304,37 @@ extension NSImage {
             return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
         }
         return size
+    }
+}
+
+/// 履歴の保存期間（Paste と同じ選択肢）
+enum Retention: String, CaseIterable, Identifiable {
+    case day, week, month, year, forever
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .day: "1日"
+        case .week: "1週間"
+        case .month: "1か月"
+        case .year: "1年"
+        case .forever: "無制限"
+        }
+    }
+
+    var days: Int? {
+        switch self {
+        case .day: 1
+        case .week: 7
+        case .month: 30
+        case .year: 365
+        case .forever: nil
+        }
+    }
+
+    static var current: Retention {
+        get { UserDefaults.standard.string(forKey: "retention").flatMap(Retention.init(rawValue:)) ?? .month }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "retention") }
     }
 }

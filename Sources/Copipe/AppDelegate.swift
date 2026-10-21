@@ -1,23 +1,25 @@
 import AppKit
 import Carbon.HIToolbox
-import ServiceManagement
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let store = ClipboardStore()
+    private let windows = WindowPresenter()
     private var panel: PanelController!
     private var hotKey: HotKey?
     private var launchedAtLogin = false
     private var statusItem: NSStatusItem!
 
-    private var showItem: NSMenuItem!
-    private var pauseItem: NSMenuItem!
-    private var loginItem: NSMenuItem!
-    private var shortcutItem: NSMenuItem!
+    private enum Tag {
+        static let show = 1
+        static let pause = 2
+        static let resume = 3
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store.start()
         panel = PanelController(store: store)
+        panel.actionMenu = makeMenu(includeShow: false)
         setupStatusItem()
         registerHotKey(Shortcut.current)
 
@@ -59,104 +61,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         hotKey = key
         Shortcut.current = shortcut
-        showItem.title = "履歴を表示（\(shortcut.title)）"
 
         if !key.isRegistered {
             let alert = NSAlert()
             alert.messageText = "\(shortcut.title) は他のアプリが使っています"
-            alert.informativeText = "Paste など、同じキーを使うアプリを終了するか、メニューバーの Copipe アイコン →「ショートカット」から別のキーを選んでください。"
+            alert.informativeText = "Paste など、同じキーを使うアプリを終了するか、Copipe の「設定…」から別のキーを選んでください。"
             NSApp.activate()
             alert.runModal()
         }
     }
 
-    @objc private func selectShortcut(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let shortcut = Shortcut(rawValue: raw) else { return }
-        registerHotKey(shortcut)
-    }
-
-    // MARK: - メニューバー
+    // MARK: - メニュー（Paste と同じ構成）
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Copipe")
+        statusItem.menu = makeMenu(includeShow: true)
+    }
 
+    private func makeMenu(includeShow: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
 
-        showItem = NSMenuItem(title: "履歴を表示", action: #selector(showPanel), keyEquivalent: "")
-        menu.addItem(showItem)
+        if includeShow {
+            let show = item("履歴を表示", #selector(showPanel), symbol: "rectangle.stack")
+            show.tag = Tag.show
+            menu.addItem(show)
+            menu.addItem(.separator())
+        }
 
-        pauseItem = NSMenuItem(title: "記録を一時停止", action: #selector(togglePause), keyEquivalent: "")
-        menu.addItem(pauseItem)
+        menu.addItem(item("Copipe について", #selector(showAbout), symbol: "info.circle"))
+        menu.addItem(.separator())
+        menu.addItem(item("新しいテキストアイテム", #selector(newTextItem), key: "n", symbol: "square.and.pencil"))
+        menu.addItem(item("設定…", #selector(showSettings), key: ",", symbol: "gearshape"))
         menu.addItem(.separator())
 
-        let shortcutMenu = NSMenu()
-        for shortcut in Shortcut.allCases {
-            let item = NSMenuItem(title: shortcut.title, action: #selector(selectShortcut(_:)), keyEquivalent: "")
-            item.representedObject = shortcut.rawValue
-            item.target = self
-            shortcutMenu.addItem(item)
-        }
-        shortcutItem = NSMenuItem(title: "ショートカット", action: nil, keyEquivalent: "")
-        shortcutItem.submenu = shortcutMenu
-        menu.addItem(shortcutItem)
+        let help = item("ヘルプ", nil, symbol: "questionmark.circle")
+        help.submenu = NSMenu()
+        help.submenu?.addItem(item("キーボードショートカット", #selector(showShortcutHelp)))
+        menu.addItem(help)
 
-        loginItem = NSMenuItem(title: "ログイン時に起動", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-        menu.addItem(loginItem)
-        menu.addItem(NSMenuItem(title: "アクセシビリティ設定を開く…", action: #selector(openAccessibility), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "履歴を消去（ピン留め以外）…", action: #selector(clearHistory), keyEquivalent: ""))
+        let pause = item("Copipe を一時停止", nil, symbol: "pause.circle")
+        pause.tag = Tag.pause
+        let pauseMenu = NSMenu()
+        for (title, minutes) in [("5分間", 5), ("15分間", 15), ("1時間", 60), ("8時間", 480)] {
+            let entry = item(title, #selector(pauseFor(_:)))
+            entry.representedObject = minutes
+            pauseMenu.addItem(entry)
+        }
+        pauseMenu.addItem(item("再開するまで", #selector(pauseFor(_:))))
+        pauseMenu.addItem(.separator())
+        let resume = item("再開する", #selector(resumeRecording))
+        resume.tag = Tag.resume
+        pauseMenu.addItem(resume)
+        pause.submenu = pauseMenu
+        menu.addItem(pause)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Copipe を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
-        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
-            item.target = self
-        }
-        statusItem.menu = menu
+        let quit = NSMenuItem(title: "Copipe を終了する", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = NSImage(systemSymbolName: "xmark.square", accessibilityDescription: nil)
+        menu.addItem(quit)
+        return menu
+    }
+
+    private func item(_ title: String, _ action: Selector?, key: String = "", symbol: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+        return item
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        pauseItem.state = store.isPaused ? .on : .off
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        for item in shortcutItem.submenu?.items ?? [] {
-            item.state = item.representedObject as? String == Shortcut.current.rawValue ? .on : .off
+        if let show = menu.item(withTag: Tag.show) {
+            show.title = "履歴を表示（\(Shortcut.current.title)）"
+        }
+        if let pause = menu.item(withTag: Tag.pause) {
+            if let until = store.pausedUntil, store.isPaused {
+                pause.title = until == .distantFuture
+                    ? "一時停止中" : "一時停止中（\(until.formatted(date: .omitted, time: .shortened)) まで）"
+            } else {
+                pause.title = "Copipe を一時停止"
+            }
+            pause.submenu?.item(withTag: Tag.resume)?.isEnabled = store.isPaused
         }
     }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.tag == Tag.resume ? store.isPaused : true
+    }
+
+    // MARK: - メニューの動作
 
     @objc private func showPanel() {
         panel.show()
     }
 
-    @objc private func togglePause() {
-        store.isPaused.toggle()
-    }
-
-    @objc private func toggleLaunchAtLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            let alert = NSAlert(error: error)
-            alert.runModal()
-        }
-    }
-
-    @objc private func openAccessibility() {
-        Paster.openAccessibilitySettings()
-    }
-
-    @objc private func clearHistory() {
-        let alert = NSAlert()
-        alert.messageText = "履歴を消去しますか？"
-        alert.informativeText = "ピン留めした項目は残ります。元に戻せません。"
-        alert.addButton(withTitle: "消去")
-        alert.addButton(withTitle: "キャンセル")
+    @objc private func showAbout() {
+        panel.hide()
         NSApp.activate()
-        if alert.runModal() == .alertFirstButtonReturn {
-            store.clearUnpinned()
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: NSAttributedString(string: "Paste 風のクリップボード履歴アプリ",
+                                         attributes: [.font: NSFont.systemFont(ofSize: 11)]),
+        ])
+    }
+
+    @objc private func newTextItem() {
+        panel.hide()
+        windows.present(id: "newText", title: "新しいテキストアイテム", size: CGSize(width: 420, height: 260)) {
+            NewTextView(model: NewTextModel(), onSave: { [weak self] text in
+                self?.store.addManualText(text)
+                self?.windows.close(id: "newText")
+            }, onCancel: { [weak self] in
+                self?.windows.close(id: "newText")
+            })
         }
+    }
+
+    @objc private func showSettings() {
+        panel.hide()
+        windows.present(id: "settings", title: "Copipe の設定", size: CGSize(width: 460, height: 380)) {
+            SettingsView(store: store, model: SettingsModel(), onShortcutChange: { [weak self] in self?.registerHotKey($0) })
+        }
+    }
+
+    @objc private func showShortcutHelp() {
+        panel.hide()
+        let alert = NSAlert()
+        alert.messageText = "キーボードショートカット"
+        alert.informativeText = HelpText.shortcuts
+        NSApp.activate()
+        alert.runModal()
+    }
+
+    @objc private func pauseFor(_ sender: NSMenuItem) {
+        let minutes = sender.representedObject as? Int
+        store.pause(for: minutes.map { Double($0) * 60 })
+    }
+
+    @objc private func resumeRecording() {
+        store.resume()
     }
 }

@@ -5,6 +5,7 @@ struct PanelView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var model: PanelModel
     var onPaste: (ClipItem) -> Void
+    var onMenu: () -> Void
     var onOpenSettings: () -> Void
 
     @FocusState private var searchFocused: Bool
@@ -39,6 +40,15 @@ struct PanelView: View {
                 searchField
                 Spacer()
                 kindMenu
+                Button(action: onMenu) {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("メニュー")
             }
             HStack(spacing: 4) {
                 tab("クリップボード", dot: .secondary, active: model.filter != .pinned) { model.filter = .all }
@@ -80,7 +90,7 @@ struct PanelView: View {
 
     private var kindMenu: some View {
         Menu {
-            ForEach([ClipFilter.all, .text, .link, .image, .file]) { filter in
+            ForEach([ClipFilter.all, .text, .link, .image, .file, .other]) { filter in
                 Button {
                     model.filter = filter
                 } label: {
@@ -289,6 +299,24 @@ struct ClipCard: View {
             }
             .padding(12)
             .frame(width: Self.width, height: Self.bodyHeight)
+        case .other:
+            VStack(spacing: 10) {
+                if let icon = AppAppearance.icon(for: item.sourceBundleID) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 88, height: 88)
+                } else {
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 56, weight: .light))
+                        .foregroundStyle(.secondary)
+                }
+                Text("\(item.sourceAppName ?? "アプリ") の素材")
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(12)
+            .frame(width: Self.width, height: Self.bodyHeight)
         }
     }
 
@@ -313,6 +341,7 @@ struct ClipCard: View {
         case .image:
             if let size = store.image(for: item)?.pixelSize { "\(Int(size.width)) × \(Int(size.height))" } else { "" }
         case .file: "\(item.filePaths?.count ?? 0) 項目"
+        case .other: ByteCountFormatter.string(fromByteCount: Int64(item.rawSize ?? 0), countStyle: .file)
         }
     }
 

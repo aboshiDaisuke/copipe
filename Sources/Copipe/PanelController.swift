@@ -28,6 +28,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     private let model = PanelModel()
     private var panel: KeyPanel!
     private var keyMonitor: Any?
+    /// 「…」ボタンで出すメニュー（Paste と同じ構成）
+    var actionMenu: NSMenu?
 
     private let panelHeight: CGFloat = 380
 
@@ -47,6 +49,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
         let view = PanelView(store: store, model: model,
                              onPaste: { [weak self] in self?.paste($0) },
+                             onMenu: { [weak self] in self?.showActionMenu() },
                              onOpenSettings: { Paster.openAccessibilitySettings() })
         panel.contentView = NSHostingView(rootView: view)
     }
@@ -100,16 +103,21 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
-        // Finder から開いて前面になっていた場合は、元のアプリに前面を返す
-        if NSApp.isActive { NSApp.hide(nil) }
+        // Finder から開いて前面になっていた場合は、元のアプリに前面を返す（設定などの画面が開いていれば何もしない）
+        let otherWindowOpen = NSApp.windows.contains { $0 !== panel && $0.isVisible && $0.canBecomeMain }
+        if NSApp.isActive && !otherWindowOpen { NSApp.hide(nil) }
     }
 
     func windowDidResignKey(_ notification: Notification) {
         hide()
     }
 
-    private func paste(_ item: ClipItem) {
-        store.copyToPasteboard(item)
+    private func showActionMenu() {
+        actionMenu?.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private func paste(_ item: ClipItem, plainText: Bool = false) {
+        store.copyToPasteboard(item, plainText: plainText)
         hide()
         guard Paster.isTrusted else { return } // 許可がなければクリップボードに入れるだけ
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
@@ -148,8 +156,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         case 124: // →
             model.selection = min(max(items.count - 1, 0), model.selection + 1)
             return true
-        case 36, 76: // return / enter
-            if let selected { paste(selected) }
+        case 36, 76: // return / enter（shift 付きなら書式なしの文字だけ）
+            if let selected { paste(selected, plainText: event.modifierFlags.contains(.shift)) }
             return true
         case 48: // tab で絞り込みを切り替え
             let all = ClipFilter.allCases
@@ -168,6 +176,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
 
         guard command, let chars = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        // ⌘N・⌘,・⌘Q はメニューの項目を実行する
+        if ["n", ",", "q"].contains(chars), actionMenu?.performKeyEquivalent(with: event) == true {
+            return true
+        }
         if chars == "p" {
             if let selected { store.togglePin(selected) }
             return true
