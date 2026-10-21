@@ -67,9 +67,14 @@ struct PanelView: View {
             HStack(spacing: 4) {
                 tab("クリップボード", dot: .secondary, active: model.board == nil) { model.board = nil }
                 ForEach(store.pinboards) { board in
-                    tab(board.name, dot: Color(rgb: board.color), active: model.board == board.id) {
+                    tab(board.name, dot: Color(rgb: board.color), active: model.board == board.id,
+                        dropping: model.dropBoard == board.id) {
                         model.board = board.id
                     }
+                    // カードをタブに落とすと、そのピンボードに入る（まとめて選んだカードは全部）
+                    .onDrop(of: [ReorderDrop.type], delegate: PinboardDrop(board: board, model: model) { id in
+                        if let item = store.items.first(where: { $0.id == id }) { onAction(.addTo(board), item) }
+                    })
                     // 引っぱって並べ替えるために、タブの位置を知らせる（動かすのは PanelController）
                     .background(GeometryReader { geo in
                         Color.clear.preference(key: TabFrames.self, value: [board.id: geo.frame(in: .global)])
@@ -125,15 +130,19 @@ struct PanelView: View {
         .background(Color.primary.opacity(model.query.isEmpty ? 0.05 : 0.1), in: Capsule())
     }
 
-    private func tab(_ title: String, dot: Color, active: Bool, action: @escaping () -> Void) -> some View {
+    private func tab(_ title: String, dot: Color, active: Bool, dropping: Bool = false,
+                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Circle().fill(dot).frame(width: 8, height: 8)
-                Text(title).font(.system(size: 13, weight: active ? .semibold : .regular))
+                Text(title).font(.system(size: 13, weight: active || dropping ? .semibold : .regular))
             }
             .padding(.horizontal, 12)
             .frame(height: 26)
-            .background(active ? Color.primary.opacity(0.12) : Color.clear, in: Capsule())
+            .background(dropping ? dot.opacity(0.35) : active ? Color.primary.opacity(0.12) : Color.clear, in: Capsule())
+            .overlay(Capsule().strokeBorder(dot, lineWidth: dropping ? 2 : 0))
+            .scaleEffect(dropping ? 1.1 : 1)
+            .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.12), value: dropping)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -388,6 +397,38 @@ struct ReorderDrop: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         model.dragging = nil
+        return true
+    }
+}
+
+/// カードをピンボードのタブに落としたとき
+struct PinboardDrop: DropDelegate {
+    let board: Pinboard
+    let model: PanelModel
+    let onDrop: (UUID) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        model.dragging != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        model.dropBoard = board.id
+    }
+
+    func dropExited(info: DropInfo) {
+        if model.dropBoard == board.id { model.dropBoard = nil }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        // Copipe の中で引っぱったときは「移動」しか受けつけないので、それに合わせる
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let id = model.dragging else { return false }
+        model.dragging = nil
+        model.dropBoard = nil
+        onDrop(id)
         return true
     }
 }

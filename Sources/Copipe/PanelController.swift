@@ -34,6 +34,8 @@ final class PanelModel: ObservableObject {
     var anchor = 0
     /// 並べ替えのために引っぱっているカード
     var dragging: UUID?
+    /// カードを引っぱって上に乗せているピンボードのタブ（光らせる）
+    @Published var dropBoard: UUID?
     /// 見えているカードの位置（引っぱり始めたカードを探すため）
     var cardFrames: [UUID: CGRect] = [:]
     /// ピンボードのタブの位置（引っぱって並べ替えるため）
@@ -295,7 +297,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         case .reveal:
             hide()
             NSWorkspace.shared.activateFileViewerSelecting(list.flatMap { $0.filePaths ?? [] }.map { URL(fileURLWithPath: $0) })
-        case .addTo(let board): list.forEach { store.add($0, to: board) }
+        case .addTo(let board):
+            list.forEach { store.add($0, to: board) }
+            Sound.copied()
         case .newPinboard: newPinboard(adding: list)
         case .delete:
             store.delete(list)
@@ -760,5 +764,6 @@ extension PanelController: NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         // どこで離しても（取り消しても）印を消す
         model.dragging = nil
+        model.dropBoard = nil
     }
 }
