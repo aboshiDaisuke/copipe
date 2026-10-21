@@ -92,16 +92,11 @@ enum PasteImporter {
             result.pinboards.append(name)
         }
 
-        // アプリと、Paste がカードの帯に使っている色（ZRAWCOLOR は 0xAARRGGBB）
+        // コピー元のアプリ
         var apps: [Int64: ClipboardStore.Source] = [:]
-        var colors: [String: Int] = [:]
-        for row in try database.rows("SELECT Z_PK, ZNAME, ZBUNDLEIDENTIFIER, ZRAWCOLOR FROM ZAPPLICATIONENTITY") {
+        for row in try database.rows("SELECT Z_PK, ZNAME, ZBUNDLEIDENTIFIER FROM ZAPPLICATIONENTITY") {
             apps[row.int(0)] = (row.string(1), row.string(2))
-            if let bundleID = row.string(2), !row.isNull(3) {
-                colors[bundleID] = Int(row.int(3) & 0xFFFFFF)
-            }
         }
-        AppAppearance.saveColors(colors)
 
         let query = """
             SELECT i.ZLIST, i.ZSOURCEAPPLICATION, i.ZTIMESTAMP, i.ZTITLE, d.ZRAWPASTEBOARDITEMS

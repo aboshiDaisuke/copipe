@@ -114,7 +114,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// 前面のアプリに貼り付けたあと（ペーストスタックがクリップボードを戻すため）
     var onPasted: (() -> Void)?
 
-    private let panelHeight: CGFloat = 380
+    private let panelHeight: CGFloat = 352
 
     init(store: ClipboardStore) {
         self.store = store

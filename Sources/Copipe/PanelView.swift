@@ -367,6 +367,7 @@ struct ReorderDrop: DropDelegate {
 
 // MARK: - カード
 
+/// 履歴のカード（Paste 7 と同じ形：中身を大きく出し、左上に種類と時間、右上にアプリのアイコン）
 struct ClipCard: View {
     let item: ClipItem
     let index: Int
@@ -376,134 +377,200 @@ struct ClipCard: View {
     let tagColor: Int?
     let store: ClipboardStore
 
-    static let width: CGFloat = 236
-    static let headerHeight: CGFloat = 58
-    static let footerHeight: CGFloat = 28
-    static let bodyHeight: CGFloat = 186
+    static let width: CGFloat = 240
+    static let height: CGFloat = 256
+    static let cornerRadius: CGFloat = 18
+    /// 画像を出すリンクのカードで、画像の高さ
+    static let linkImageHeight: CGFloat = 150
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            content
-                .frame(width: Self.width, height: Self.bodyHeight, alignment: .topLeading)
-                .clipped()
-            footer
-        }
-        .frame(width: Self.width)
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .strokeBorder(Color.accentColor, lineWidth: 4)
-                .padding(-4)
-                .opacity(selected ? 1 : 0)
-        )
+        content
+            .frame(width: Self.width, height: Self.height, alignment: .top)
+            .background(background)
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08))
+            )
+            .overlay(alignment: .bottomTrailing) {
+                if showShortcut && index < 9 {
+                    Text("⌘\(index + 1)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(10)
+                }
+            }
+            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius + 4, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 4)
+                    .padding(-4)
+                    .opacity(selected ? 1 : 0)
+            )
+            .help(item.sourceAppName ?? "")
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                Text(Date().timeIntervalSince(item.date) < 60
-                     ? "たった今" : Self.relative.localizedString(for: item.date, relativeTo: Date()))
-                    .font(.system(size: 12))
-                    .opacity(0.85)
+    /// カードの地は白（ダークモードでは黒）。ピンボードに入っているものだけ、その色を薄く敷く
+    private var background: some View {
+        ZStack {
+            Color(nsColor: .textBackgroundColor)
+            boardColor?.opacity(0.12)
+        }
+    }
+
+    /// 入っているピンボードの色
+    private var boardColor: Color? {
+        if let id = item.pinboardID, let board = store.pinboards.first(where: { $0.id == id }) {
+            return Color(rgb: board.color)
+        }
+        return tagColor.map { Color(rgb: $0) }
+    }
+
+    private var timeText: String {
+        Date().timeIntervalSince(item.date) < 60
+            ? "たった今" : Self.relative.localizedString(for: item.date, relativeTo: Date())
+    }
+
+    /// 左上の「種類・時間」と右上のアプリのアイコン。onMedia なら画像の上に白い文字で重ねる
+    private func header(onMedia: Bool, color: Color = .primary) -> some View {
+        HStack(spacing: 6) {
+            if let boardColor {
+                Circle()
+                    .fill(boardColor)
+                    .frame(width: 9, height: 9)
+                    .overlay(Circle().strokeBorder(.white.opacity(onMedia ? 0.9 : 0), lineWidth: 1))
             }
-            .padding(.leading, 12)
+            Text(item.displayTitle)
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+            Text(timeText)
+                .font(.system(size: 14))
+                .opacity(0.7)
+                .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: 4)
             if let icon = AppAppearance.icon(for: item.sourceBundleID) {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 52, height: 52)
-                    .offset(x: 8)
+                    .frame(width: 26, height: 26)
             }
         }
-        .foregroundStyle(AppAppearance.textColor(on: headerColor))
-        .frame(width: Self.width, height: Self.headerHeight)
-        .background(Color(nsColor: headerColor))
-        .clipped()
-        .help(item.sourceAppName ?? "")
+        .foregroundStyle(onMedia ? Color.white : color)
+        .shadow(color: .black.opacity(onMedia ? 0.4 : 0), radius: 3, y: 1)
+        .padding(.horizontal, 14)
+        .frame(width: Self.width, height: 44)
+        .background(alignment: .top) {
+            // 明るい画像の上でも白い文字が読めるように、上だけ暗くする
+            if onMedia {
+                LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 76)
+            }
+        }
     }
 
-    /// ピンボードに入っている内容はピンボードの色、それ以外はコピー元アプリの色
-    private var headerColor: NSColor {
-        if let id = item.pinboardID, let board = store.pinboards.first(where: { $0.id == id }) {
-            return NSColor(rgb: board.color)
-        }
-        if let tagColor { return NSColor(rgb: tagColor) }
-        return AppAppearance.nsColor(for: item.sourceBundleID)
+    /// 下の小さい説明（文字数・大きさなど）
+    private func footer(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 画像の上に重ねる小さい説明
+    private func mediaCaption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
     private var content: some View {
+        let detail = Self.detail(of: item, store: store)
         if let rgb = item.colorValue {
             // 色の見本
-            ZStack {
+            let textColor = AppAppearance.textColor(on: NSColor(rgb: rgb))
+            ZStack(alignment: .top) {
                 Color(rgb: rgb)
                 Text(rgb.hexColor)
-                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(AppAppearance.textColor(on: NSColor(rgb: rgb)))
+                    .font(.system(size: 24, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(textColor)
+                    .frame(maxHeight: .infinity)
+                header(onMedia: false, color: textColor)
             }
-            .frame(width: Self.width, height: Self.bodyHeight)
         } else {
             switch item.kind {
             case .text:
-                // カードに見えるのは数行なので、長い文章は先頭だけ描く
-                Text(String((item.text ?? "").prefix(1_200)))
-                    .font(.system(size: 13))
-                    .lineSpacing(2)
-                    .padding(12)
-            case .link:
-                LinkCardBody(link: item.text ?? "", previews: .shared)
-            case .image:
-                if let image = store.image(for: item) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: Self.width, height: Self.bodyHeight)
+                VStack(alignment: .leading, spacing: 2) {
+                    header(onMedia: false)
+                    // カードに見えるのは数行なので、長い文章は先頭だけ描く
+                    Text(String((item.text ?? "").prefix(1_200)))
+                        .font(.system(size: 15))
+                        .lineSpacing(3)
+                        .padding(.horizontal, 14)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .clipped()
+                    footer(detail)
                 }
+            case .link:
+                LinkCardBody(link: item.text ?? "", previews: .shared) { onMedia in
+                    header(onMedia: onMedia)
+                }
+            case .image:
+                ZStack(alignment: .top) {
+                    if let image = store.image(for: item) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: Self.width, height: Self.height)
+                            .clipped()
+                    }
+                    header(onMedia: true)
+                }
+                .overlay(alignment: .bottomLeading) { mediaCaption(detail) }
             case .file:
-                let paths = item.filePaths ?? []
-                // 複数のときは1つ目のサムネイルを出す（件数は下に表示）
-                if let first = paths.first {
-                    FileThumbnail(path: first, cache: .shared)
+                if let first = item.filePaths?.first {
+                    FileCardBody(path: first, cache: .shared,
+                                 header: { onMedia in header(onMedia: onMedia) },
+                                 caption: { onMedia in
+                                     if onMedia { mediaCaption(detail) } else { footer(detail) }
+                                 })
                 }
             case .other:
-                VStack(spacing: 10) {
+                VStack(spacing: 0) {
+                    header(onMedia: false)
+                    Spacer(minLength: 0)
                     if let icon = AppAppearance.icon(for: item.sourceBundleID) {
                         Image(nsImage: icon)
                             .resizable()
-                            .frame(width: 88, height: 88)
+                            .frame(width: 84, height: 84)
                     } else {
                         Image(systemName: "shippingbox")
-                            .font(.system(size: 56, weight: .light))
+                            .font(.system(size: 52, weight: .light))
                             .foregroundStyle(.secondary)
                     }
                     Text("\(item.sourceAppName ?? "アプリ") の素材")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 14, weight: .medium))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
+                    Spacer(minLength: 0)
+                    footer(detail)
                 }
-                .padding(12)
-                .frame(width: Self.width, height: Self.bodyHeight)
             }
         }
-    }
-
-    private var footer: some View {
-        HStack {
-            Text(Self.detail(of: item, store: store))
-            Spacer()
-            if showShortcut && index < 9 {
-                Text("⌘\(index + 1)").fontWeight(.semibold)
-            }
-        }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .frame(width: Self.width, height: Self.footerHeight)
     }
 
     /// カードの下・プレビューの右上に出す説明（文字数・大きさ・ファイル名など）
@@ -530,37 +597,40 @@ struct ClipCard: View {
     }()
 }
 
-/// リンクのカード：ページの画像と題名（取れるまでは地球のマーク）
-struct LinkCardBody: View {
+/// リンクのカード：上にページの画像、下に題名とサイト名（画像が取れないときは地球のマーク）
+struct LinkCardBody<Header: View>: View {
     let link: String
     @ObservedObject var previews: LinkPreviews
+    @ViewBuilder var header: (Bool) -> Header
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                Color.primary.opacity(0.05)
-                if let image = previews.image(for: link) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Image(systemName: "globe")
-                        .font(.system(size: 40, weight: .light))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: ClipCard.width, height: 106)
-            .clipped()
-            VStack(alignment: .leading, spacing: 3) {
-                Text(previews.title(for: link) ?? URL(string: link)?.host ?? "")
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(2)
-                Text(link)
-                    .font(.system(size: 12))
+        VStack(alignment: .leading, spacing: 0) {
+            if let image = previews.image(for: link) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: ClipCard.width, height: ClipCard.linkImageHeight)
+                    .clipped()
+                    .overlay(alignment: .top) { header(true) }
+            } else {
+                header(false)
+                Image(systemName: "globe")
+                    .font(.system(size: 44, weight: .light))
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .frame(width: ClipCard.width, height: ClipCard.linkImageHeight - 44)
             }
-            .padding(.horizontal, 12)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(previews.title(for: link) ?? URL(string: link)?.host ?? link)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(2)
+                Text(URL(string: link)?.host ?? link)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            Spacer(minLength: 0)
         }
         .onAppear { previews.request(link) }
     }
@@ -579,13 +649,10 @@ struct VisualEffectBackground: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-/// コピー元アプリのアイコンと色（Paste から引き継いだ色があればそれを使い、なければアイコンから取る）
+/// コピー元アプリのアイコンと、色の上に載せる文字の色
 @MainActor
 enum AppAppearance {
     private static var iconCache: [String: NSImage] = [:]
-    private static var colorCache: [String: NSColor] = [:]
-    private static let fallback = NSColor(white: 0.5, alpha: 1)
-    private static let savedColorsKey = "appColors"
 
     static func icon(for bundleID: String?) -> NSImage? {
         guard let bundleID else { return nil }
@@ -596,75 +663,10 @@ enum AppAppearance {
         return icon
     }
 
-    /// Paste に記録されていたアプリごとの色（0xRRGGBB）を保存する
-    static func saveColors(_ colors: [String: Int]) {
-        var saved = UserDefaults.standard.dictionary(forKey: savedColorsKey) as? [String: Int] ?? [:]
-        saved.merge(colors) { _, new in new }
-        UserDefaults.standard.set(saved, forKey: savedColorsKey)
-        colorCache.removeAll()
-    }
-
-    /// 帯の色に対して読みやすいほう（白か黒）
+    /// その色の上で読みやすいほう（白か黒）
     static func textColor(on color: NSColor) -> Color {
         let l = luminance(color)
         return (1.05 / (l + 0.05)) >= ((l + 0.05) / 0.05) ? .white : .black
-    }
-
-    static func nsColor(for bundleID: String?) -> NSColor {
-        guard let bundleID else { return fallback }
-        if let cached = colorCache[bundleID] { return cached }
-        let color: NSColor
-        if let rgb = (UserDefaults.standard.dictionary(forKey: savedColorsKey) as? [String: Int])?[bundleID] {
-            color = NSColor(rgb: rgb)
-        } else if let icon = icon(for: bundleID) {
-            color = dominantColor(of: icon)
-        } else {
-            return fallback
-        }
-        colorCache[bundleID] = color
-        return color
-    }
-
-    /// アイコンで一番多い色味を拾う（色相を12分割して、彩度の高い色を優先）
-    private static func dominantColor(of image: NSImage) -> NSColor {
-        let size = 32
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
-            return .gray
-        }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        image.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
-        NSGraphicsContext.restoreGraphicsState()
-
-        var bins = Array(repeating: (weight: 0.0, r: 0.0, g: 0.0, b: 0.0), count: 12)
-        var gray = (weight: 0.0, r: 0.0, g: 0.0, b: 0.0)
-        for x in 0..<size {
-            for y in 0..<size {
-                guard let c = rep.colorAt(x: x, y: y), c.alphaComponent > 0.5 else { continue }
-                let s = Double(c.saturationComponent), v = Double(c.brightnessComponent)
-                if s > 0.25 && v > 0.2 {
-                    let i = min(11, Int(c.hueComponent * 12))
-                    let w = s * v
-                    bins[i].weight += w
-                    bins[i].r += Double(c.redComponent) * w
-                    bins[i].g += Double(c.greenComponent) * w
-                    bins[i].b += Double(c.blueComponent) * w
-                } else {
-                    gray.weight += 1
-                    gray.r += Double(c.redComponent)
-                    gray.g += Double(c.greenComponent)
-                    gray.b += Double(c.blueComponent)
-                }
-            }
-        }
-        let best = bins.max { $0.weight < $1.weight }!
-        // 色のついた部分がほとんどないアイコンはグレー系にする
-        let chosen = best.weight > gray.weight * 0.08 ? best : gray
-        guard chosen.weight > 0 else { return .gray }
-        return NSColor(red: chosen.r / chosen.weight, green: chosen.g / chosen.weight,
-                       blue: chosen.b / chosen.weight, alpha: 1)
     }
 
     private static func luminance(_ color: NSColor) -> Double {
@@ -693,32 +695,36 @@ extension Color {
     }
 }
 
-/// ファイルの中身のサムネイル（画像・動画・PDF など）。作れないファイルはアイコンと名前を出す
-struct FileThumbnail: View {
+/// ファイルのカード。中身のサムネイル（画像・動画・PDF など）が作れればカードいっぱいに出し、
+/// 作れないファイルはアイコンと名前を出す
+struct FileCardBody<Header: View, Caption: View>: View {
     let path: String
     @ObservedObject var cache: ThumbnailCache
+    @ViewBuilder var header: (Bool) -> Header
+    @ViewBuilder var caption: (Bool) -> Caption
 
     var body: some View {
         Group {
             if let image = cache.images[path] {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: ClipCard.width, height: ClipCard.bodyHeight)
-                    .clipped()
+                ZStack(alignment: .top) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: ClipCard.width, height: ClipCard.height)
+                        .clipped()
+                    header(true)
+                }
+                .overlay(alignment: .bottomLeading) { caption(true) }
             } else {
-                VStack(spacing: 8) {
+                VStack(spacing: 0) {
+                    header(false)
+                    Spacer(minLength: 0)
                     Image(nsImage: NSWorkspace.shared.icon(forFile: path))
                         .resizable()
-                        .frame(width: 88, height: 88)
-                    Text((path as NSString).lastPathComponent)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .truncationMode(.middle)
+                        .frame(width: 84, height: 84)
+                    Spacer(minLength: 0)
+                    caption(false)
                 }
-                .padding(12)
-                .frame(width: ClipCard.width, height: ClipCard.bodyHeight)
             }
         }
         .onAppear { cache.request(path) }
@@ -735,7 +741,7 @@ final class ThumbnailCache: ObservableObject {
         guard !requested.contains(path) else { return }
         requested.insert(path)
         let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: path),
-                                                   size: CGSize(width: ClipCard.width, height: ClipCard.bodyHeight),
+                                                   size: CGSize(width: ClipCard.width, height: ClipCard.height),
                                                    scale: 2, representationTypes: .thumbnail)
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
             guard let image = representation?.nsImage else { return }
