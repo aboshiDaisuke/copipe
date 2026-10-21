@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookThumbnailing
 import SwiftUI
 
 struct PanelView: View {
@@ -6,6 +7,9 @@ struct PanelView: View {
     @ObservedObject var model: PanelModel
     var onPaste: (ClipItem) -> Void
     var onMenu: () -> Void
+    var onNewPinboard: (ClipItem?) -> Void
+    var onRenamePinboard: (Pinboard) -> Void
+    var onDeletePinboard: (Pinboard) -> Void
     var onOpenSettings: () -> Void
 
     @FocusState private var searchFocused: Bool
@@ -51,8 +55,25 @@ struct PanelView: View {
                 .help("メニュー")
             }
             HStack(spacing: 4) {
-                tab("クリップボード", dot: .secondary, active: model.filter != .pinned) { model.filter = .all }
-                tab("ピン留め", dot: .red, active: model.filter == .pinned) { model.filter = .pinned }
+                tab("クリップボード", dot: .secondary, active: model.board == nil) { model.board = nil }
+                ForEach(store.pinboards) { board in
+                    tab(board.name, dot: Color(rgb: board.color), active: model.board == board.id) {
+                        model.board = board.id
+                    }
+                    .contextMenu {
+                        Button("名前を変更…") { onRenamePinboard(board) }
+                        Button("削除…", role: .destructive) { onDeletePinboard(board) }
+                    }
+                }
+                Button { onNewPinboard(nil) } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("新しいピンボード")
             }
         }
         .padding(.horizontal, 20)
@@ -104,7 +125,7 @@ struct PanelView: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "line.3.horizontal.decrease")
-                if model.filter != .all && model.filter != .pinned {
+                if model.filter != .all {
                     Text(model.filter.rawValue)
                 }
             }
@@ -130,30 +151,45 @@ struct PanelView: View {
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "doc.on.clipboard").font(.system(size: 32)).foregroundStyle(.secondary)
-            Text(store.items.isEmpty ? "まだ履歴がありません。何かコピーしてみてください。" : "見つかりませんでした")
+            Text(emptyMessage)
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var emptyMessage: String {
+        if !model.query.isEmpty || model.filter != .all { return "見つかりませんでした" }
+        if model.board != nil { return "このピンボードは空です。カードを右クリックして「ピンボードに追加」で入れられます。" }
+        return "まだ履歴がありません。何かコピーしてみてください。"
+    }
+
     // MARK: - カード列
 
     private func cards(_ items: [ClipItem]) -> some View {
-        ScrollViewReader { proxy in
+        let tagColors = store.pinboardColorsBySignature()
+        return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 16) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         ClipCard(item: item, index: index, selected: index == model.selection,
-                                 showShortcut: model.commandHeld, store: store)
+                                 showShortcut: model.commandHeld, tagColor: tagColors[item.signature], store: store)
                             .id(item.id)
                             .onTapGesture(count: 2) { onPaste(item) }
                             .onTapGesture { model.selection = index }
                             .contextMenu {
                                 Button("貼り付け") { onPaste(item) }
-                                Button(item.pinned ? "ピン留めを外す" : "ピン留め") { store.togglePin(item) }
+                                Menu("ピンボードに追加") {
+                                    ForEach(store.pinboards) { board in
+                                        Button(board.name) { store.add(item, to: board) }
+                                    }
+                                    if !store.pinboards.isEmpty { Divider() }
+                                    Button("新しいピンボード…") { onNewPinboard(item) }
+                                }
                                 Divider()
-                                Button("削除", role: .destructive) { store.delete(item) }
+                                Button(item.pinboardID == nil ? "削除" : "ピンボードから削除", role: .destructive) {
+                                    store.delete(item)
+                                }
                             }
                     }
                 }
@@ -180,6 +216,8 @@ struct ClipCard: View {
     let index: Int
     let selected: Bool
     let showShortcut: Bool
+    /// この内容が入っているピンボードの色（ピンボードに入れたら履歴のカードもその色になる）
+    let tagColor: Int?
     let store: ClipboardStore
 
     static let width: CGFloat = 236
@@ -210,7 +248,7 @@ struct ClipCard: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 15, weight: .semibold))
+                Text(title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                 Text(Date().timeIntervalSince(item.date) < 60
                      ? "たった今" : Self.relative.localizedString(for: item.date, relativeTo: Date()))
                     .font(.system(size: 12))
@@ -218,11 +256,6 @@ struct ClipCard: View {
             }
             .padding(.leading, 12)
             Spacer(minLength: 4)
-            if item.pinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 12))
-                    .padding(.trailing, 6)
-            }
             if let icon = AppAppearance.icon(for: item.sourceBundleID) {
                 Image(nsImage: icon)
                     .resizable()
@@ -230,14 +263,24 @@ struct ClipCard: View {
                     .offset(x: 8)
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(AppAppearance.textColor(on: headerColor))
         .frame(width: Self.width, height: Self.headerHeight)
-        .background(AppAppearance.color(for: item.sourceBundleID))
+        .background(Color(nsColor: headerColor))
         .clipped()
         .help(item.sourceAppName ?? "")
     }
 
+    /// ピンボードに入っている内容はピンボードの色、それ以外はコピー元アプリの色
+    private var headerColor: NSColor {
+        if let id = item.pinboardID, let board = store.pinboards.first(where: { $0.id == id }) {
+            return NSColor(rgb: board.color)
+        }
+        if let tagColor { return NSColor(rgb: tagColor) }
+        return AppAppearance.nsColor(for: item.sourceBundleID)
+    }
+
     private var title: String {
+        if let title = item.title { return title }
         if item.kind == .file, let count = item.filePaths?.count, count > 1 {
             return "\(count) 個のファイル"
         }
@@ -282,23 +325,10 @@ struct ClipCard: View {
             }
         case .file:
             let paths = item.filePaths ?? []
-            VStack(spacing: 8) {
-                if let first = paths.first {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: first))
-                        .resizable()
-                        .frame(width: 88, height: 88)
-                    Text((first as NSString).lastPathComponent)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .truncationMode(.middle)
-                }
-                if paths.count > 1 {
-                    Text("ほか \(paths.count - 1) 件").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
+            // 複数のときは1つ目のサムネイルを出す（件数は下に表示）
+            if let first = paths.first {
+                FileThumbnail(path: first, cache: .shared)
             }
-            .padding(12)
-            .frame(width: Self.width, height: Self.bodyHeight)
         case .other:
             VStack(spacing: 10) {
                 if let icon = AppAppearance.icon(for: item.sourceBundleID) {
@@ -340,7 +370,9 @@ struct ClipCard: View {
         case .link: URL(string: item.text ?? "")?.host ?? ""
         case .image:
             if let size = store.image(for: item)?.pixelSize { "\(Int(size.width)) × \(Int(size.height))" } else { "" }
-        case .file: "\(item.filePaths?.count ?? 0) 項目"
+        case .file:
+            if let paths = item.filePaths, paths.count == 1 { (paths[0] as NSString).lastPathComponent }
+            else { "\(item.filePaths?.count ?? 0) 項目" }
         case .other: ByteCountFormatter.string(fromByteCount: Int64(item.rawSize ?? 0), countStyle: .file)
         }
     }
@@ -366,12 +398,13 @@ struct VisualEffectBackground: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-/// コピー元アプリのアイコンと、アイコンから取った色
+/// コピー元アプリのアイコンと色（Paste から引き継いだ色があればそれを使い、なければアイコンから取る）
 @MainActor
 enum AppAppearance {
     private static var iconCache: [String: NSImage] = [:]
-    private static var colorCache: [String: Color] = [:]
-    private static let fallback = Color(white: 0.35)
+    private static var colorCache: [String: NSColor] = [:]
+    private static let fallback = NSColor(white: 0.5, alpha: 1)
+    private static let savedColorsKey = "appColors"
 
     static func icon(for bundleID: String?) -> NSImage? {
         guard let bundleID else { return nil }
@@ -382,11 +415,31 @@ enum AppAppearance {
         return icon
     }
 
-    static func color(for bundleID: String?) -> Color {
+    /// Paste に記録されていたアプリごとの色（0xRRGGBB）を保存する
+    static func saveColors(_ colors: [String: Int]) {
+        var saved = UserDefaults.standard.dictionary(forKey: savedColorsKey) as? [String: Int] ?? [:]
+        saved.merge(colors) { _, new in new }
+        UserDefaults.standard.set(saved, forKey: savedColorsKey)
+        colorCache.removeAll()
+    }
+
+    /// 帯の色に対して読みやすいほう（白か黒）
+    static func textColor(on color: NSColor) -> Color {
+        let l = luminance(color)
+        return (1.05 / (l + 0.05)) >= ((l + 0.05) / 0.05) ? .white : .black
+    }
+
+    static func nsColor(for bundleID: String?) -> NSColor {
         guard let bundleID else { return fallback }
         if let cached = colorCache[bundleID] { return cached }
-        guard let icon = icon(for: bundleID) else { return fallback }
-        let color = Color(nsColor: readableForWhiteText(dominantColor(of: icon)))
+        let color: NSColor
+        if let rgb = (UserDefaults.standard.dictionary(forKey: savedColorsKey) as? [String: Int])?[bundleID] {
+            color = NSColor(rgb: rgb)
+        } else if let icon = icon(for: bundleID) {
+            color = dominantColor(of: icon)
+        } else {
+            return fallback
+        }
         colorCache[bundleID] = color
         return color
     }
@@ -433,18 +486,6 @@ enum AppAppearance {
                        blue: chosen.b / chosen.weight, alpha: 1)
     }
 
-    /// 白文字とのコントラストが 4.5:1 以上になるまで暗くする
-    private static func readableForWhiteText(_ color: NSColor) -> NSColor {
-        var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
-        (color.usingColorSpace(.deviceRGB) ?? color).getHue(&h, saturation: &s, brightness: &v, alpha: &a)
-        var result = NSColor(hue: h, saturation: s, brightness: v, alpha: 1)
-        while v > 0.05 && luminance(result) > 0.18 {
-            v -= 0.02
-            result = NSColor(hue: h, saturation: s, brightness: v, alpha: 1)
-        }
-        return result
-    }
-
     private static func luminance(_ color: NSColor) -> Double {
         guard let c = color.usingColorSpace(.sRGB) else { return 0 }
         func linear(_ x: CGFloat) -> Double {
@@ -452,5 +493,72 @@ enum AppAppearance {
             return x <= 0.03928 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
         }
         return 0.2126 * linear(c.redComponent) + 0.7152 * linear(c.greenComponent) + 0.0722 * linear(c.blueComponent)
+    }
+}
+
+extension NSColor {
+    /// 0xRRGGBB から色を作る
+    convenience init(rgb: Int) {
+        self.init(srgbRed: CGFloat((rgb >> 16) & 0xff) / 255, green: CGFloat((rgb >> 8) & 0xff) / 255,
+                  blue: CGFloat(rgb & 0xff) / 255, alpha: 1)
+    }
+}
+
+extension Color {
+    /// 0xRRGGBB から色を作る
+    init(rgb: Int) {
+        self.init(red: Double((rgb >> 16) & 0xff) / 255, green: Double((rgb >> 8) & 0xff) / 255,
+                  blue: Double(rgb & 0xff) / 255)
+    }
+}
+
+/// ファイルの中身のサムネイル（画像・動画・PDF など）。作れないファイルはアイコンと名前を出す
+struct FileThumbnail: View {
+    let path: String
+    @ObservedObject var cache: ThumbnailCache
+
+    var body: some View {
+        Group {
+            if let image = cache.images[path] {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: ClipCard.width, height: ClipCard.bodyHeight)
+                    .clipped()
+            } else {
+                VStack(spacing: 8) {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                        .resizable()
+                        .frame(width: 88, height: 88)
+                    Text((path as NSString).lastPathComponent)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .truncationMode(.middle)
+                }
+                .padding(12)
+                .frame(width: ClipCard.width, height: ClipCard.bodyHeight)
+            }
+        }
+        .onAppear { cache.request(path) }
+    }
+}
+
+@MainActor
+final class ThumbnailCache: ObservableObject {
+    static let shared = ThumbnailCache()
+    @Published private(set) var images: [String: NSImage] = [:]
+    private var requested: Set<String> = []
+
+    func request(_ path: String) {
+        guard !requested.contains(path) else { return }
+        requested.insert(path)
+        let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: path),
+                                                   size: CGSize(width: ClipCard.width, height: ClipCard.bodyHeight),
+                                                   scale: 2, representationTypes: .thumbnail)
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+            guard let image = representation?.nsImage else { return }
+            Task { @MainActor in self.images[path] = image }
+        }
     }
 }

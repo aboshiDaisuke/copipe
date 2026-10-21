@@ -28,6 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if !launchedAtLogin {
             showAfterActivation()
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--copy-paste-db"), i + 1 < CommandLine.arguments.count {
+            PasteImporter.copyDatabase(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--import-paste"), i + 1 < CommandLine.arguments.count {
+            let summary = PasteImporter.summary(of: Result { try PasteImporter.run(into: store) })
+            try? summary.write(toFile: CommandLine.arguments[i + 1], atomically: true, encoding: .utf8)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
             let path = CommandLine.arguments[i + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.panel.snapshot(to: path) }

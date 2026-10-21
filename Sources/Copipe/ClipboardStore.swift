@@ -1,16 +1,17 @@
 import AppKit
 import CryptoKit
 
-/// クリップボードを監視して履歴を保存・管理する
+/// クリップボードを監視して履歴・ピンボードを保存・管理する
 @MainActor
 final class ClipboardStore: ObservableObject {
     @Published private(set) var items: [ClipItem] = []
+    @Published private(set) var pinboards: [Pinboard] = []
     /// この日時まで記録を止める（distantFuture なら再開するまで）
     @Published private(set) var pausedUntil: Date?
 
     var isPaused: Bool { (pausedUntil ?? .distantPast) > Date() }
 
-    /// 保存期間に関係なく、これを超えた古い履歴は消す（ピン留めは除く）
+    /// 保存期間に関係なく、これを超えた古い履歴は消す（ピンボードの項目は除く）
     let maxItems = 2000
     /// これより大きいクリップボードは丸ごとは保存しない
     private let maxRawSize = 50_000_000
@@ -23,6 +24,7 @@ final class ClipboardStore: ObservableObject {
     private let imagesDir: URL
     private let rawDir: URL
     private let historyURL: URL
+    private let pinboardsURL: URL
 
     /// パスワード管理アプリなどが「記録しないで」と付けてくる型
     private static let ignoredTypes: Set<String> = [
@@ -32,15 +34,19 @@ final class ClipboardStore: ObservableObject {
         "com.agilebits.onepassword",
     ]
 
+    typealias Source = (appName: String?, bundleID: String?)
+
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         baseDir = support.appendingPathComponent("Copipe", isDirectory: true)
         imagesDir = baseDir.appendingPathComponent("images", isDirectory: true)
         rawDir = baseDir.appendingPathComponent("raw", isDirectory: true)
         historyURL = baseDir.appendingPathComponent("history.json")
+        pinboardsURL = baseDir.appendingPathComponent("pinboards.json")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: rawDir, withIntermediateDirectories: true)
         load()
+        migratePinnedItems()
         trim()
     }
 
@@ -62,33 +68,52 @@ final class ClipboardStore: ObservableObject {
         if types.contains(where: { Self.ignoredTypes.contains($0.rawValue) }) { return }
 
         let front = NSWorkspace.shared.frontmostApplication
-        let source = (appName: front?.localizedName, bundleID: front?.bundleIdentifier)
+        guard let item = makeItem(from: pb, source: (front?.localizedName, front?.bundleIdentifier)) else { return }
+        addToHistory(item)
+    }
+
+    /// クリップボードの中身から項目を作る（画像・丸ごとのデータはファイルに保存する）
+    private func makeItem(from pb: NSPasteboard, source: Source, date: Date = Date(),
+                          pinboardID: UUID? = nil, title: String? = nil) -> ClipItem? {
         let raw = captureRaw(pb)
+        var kind: ClipKind
+        var text: String?
+        var imageName: String?
+        var filePaths: [String]?
+        var signature: String
 
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
-            let paths = urls.map(\.path)
-            add(kind: .file, filePaths: paths, signature: "f:" + paths.joined(separator: "\n"), raw: raw, source: source)
+            kind = .file
+            filePaths = urls.map(\.path)
+            signature = "f:" + urls.map(\.path).joined(separator: "\n")
         } else if let string = pb.string(forType: .string),
                   !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard string.utf8.count < 2_000_000 else { return }
-            let kind: ClipKind = Self.isLink(string) ? .link : .text
-            add(kind: kind, text: string, signature: "t:" + string, raw: raw, source: source)
+            guard string.utf8.count < 2_000_000 else { return nil }
+            kind = Self.isLink(string) ? .link : .text
+            text = string
+            signature = "t:" + string
         } else if let image = NSImage(pasteboard: pb), let png = image.pngData() {
-            let signature = "i:" + Self.hash(png)
-            if items.contains(where: { $0.signature == signature }) {
-                add(kind: .image, signature: signature, raw: raw, source: source)
-            } else {
-                let name = Self.hash(png) + ".png"
-                try? png.write(to: imagesDir.appendingPathComponent(name))
-                add(kind: .image, imageName: name, signature: signature, raw: raw, source: source)
-            }
+            kind = .image
+            let name = Self.hash(png) + ".png"
+            let url = imagesDir.appendingPathComponent(name)
+            if !FileManager.default.fileExists(atPath: url.path) { try? png.write(to: url) }
+            imageName = name
+            signature = "i:" + Self.hash(png)
         } else if let raw {
             // 文字や画像として読めないアプリ独自のデータ（Final Cut Pro・Filmora の素材など）
+            kind = .other
             var all = Data()
             for entry in raw.items.joined() { all.append(entry.data) }
-            add(kind: .other, signature: "r:" + Self.hash(all), raw: raw, source: source)
+            signature = "r:" + Self.hash(all)
+        } else {
+            return nil
         }
+
+        return ClipItem(id: UUID(), kind: kind, text: text, imageName: imageName, filePaths: filePaths,
+                        rawName: raw.flatMap(saveRaw), rawSize: raw?.totalSize,
+                        sourceAppName: source.appName, sourceBundleID: source.bundleID,
+                        date: date, signature: signature, pinboardID: pinboardID, title: title)
     }
 
     private func captureRaw(_ pb: NSPasteboard) -> RawPasteboard? {
@@ -117,25 +142,20 @@ final class ClipboardStore: ObservableObject {
         return ["http", "https"].contains(url.scheme?.lowercased() ?? "") && url.host != nil
     }
 
-    private func add(kind: ClipKind, text: String? = nil, imageName: String? = nil, filePaths: [String]? = nil,
-                     signature: String, raw: RawPasteboard?, source: (appName: String?, bundleID: String?)) {
-        if let idx = items.firstIndex(where: { $0.signature == signature }) {
-            // 既にある内容なら先頭に移動して、丸ごとのデータだけ新しいものに差し替える
+    /// 履歴の先頭に入れる。同じ内容が既にあればそれを先頭に移し、丸ごとのデータだけ新しいものにする
+    private func addToHistory(_ item: ClipItem) {
+        if let idx = items.firstIndex(where: { $0.pinboardID == nil && $0.signature == item.signature }) {
             var existing = items.remove(at: idx)
-            existing.date = Date()
-            existing.sourceAppName = source.appName
-            existing.sourceBundleID = source.bundleID
-            if let raw {
+            existing.date = item.date
+            existing.sourceAppName = item.sourceAppName
+            existing.sourceBundleID = item.sourceBundleID
+            if item.rawName != nil {
                 removeRawFile(of: existing)
-                existing.rawName = saveRaw(raw)
-                existing.rawSize = raw.totalSize
+                existing.rawName = item.rawName
+                existing.rawSize = item.rawSize
             }
             items.insert(existing, at: 0)
         } else {
-            let item = ClipItem(id: UUID(), kind: kind, text: text, imageName: imageName, filePaths: filePaths,
-                                rawName: raw.flatMap(saveRaw), rawSize: raw?.totalSize,
-                                sourceAppName: source.appName, sourceBundleID: source.bundleID,
-                                date: Date(), signature: signature)
             items.insert(item, at: 0)
             trim()
         }
@@ -143,17 +163,19 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func trim() {
-        var unpinned = 0
+        var count = 0
         let limit = Retention.current.days.map { Date().addingTimeInterval(-Double($0) * 86_400) }
+        var removed: [ClipItem] = []
         items.removeAll { item in
-            guard !item.pinned else { return false }
-            unpinned += 1
-            if unpinned > maxItems || (limit.map { item.date < $0 } ?? false) {
-                removeFiles(of: item)
+            guard item.pinboardID == nil else { return false }
+            count += 1
+            if count > maxItems || (limit.map { item.date < $0 } ?? false) {
+                removed.append(item)
                 return true
             }
             return false
         }
+        removed.forEach(removeFiles)
     }
 
     // MARK: - 操作
@@ -175,26 +197,24 @@ final class ClipboardStore: ObservableObject {
     /// 「新しいテキストアイテム」で入力した文字を履歴に入れる
     func addManualText(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        add(kind: .text, text: text, signature: "t:" + text, raw: nil,
-            source: (appName: "Copipe", bundleID: Bundle.main.bundleIdentifier))
+        addToHistory(ClipItem(id: UUID(), kind: .text, text: text, sourceAppName: "Copipe",
+                              sourceBundleID: Bundle.main.bundleIdentifier, date: Date(), signature: "t:" + text))
     }
 
     /// 履歴の項目をクリップボードに戻す（自分自身の書き込みは記録しない）
     /// plainText が true なら書式を外して文字だけにする
     func copyToPasteboard(_ item: ClipItem, plainText: Bool = false) {
         let pb = NSPasteboard.general
+        write(item, to: pb, plainText: plainText)
+        lastChangeCount = pb.changeCount
+        if item.pinboardID == nil { moveToTop(item) }
+    }
+
+    private func write(_ item: ClipItem, to pb: NSPasteboard, plainText: Bool) {
         pb.clearContents()
         if let raw = loadRaw(of: item), !(plainText && item.text != nil) {
             // コピーしたときのデータを全形式そのまま戻す
-            pb.writeObjects(raw.items.map { entries in
-                let pasteboardItem = NSPasteboardItem()
-                for entry in entries {
-                    pasteboardItem.setData(entry.data, forType: NSPasteboard.PasteboardType(entry.type))
-                }
-                return pasteboardItem
-            })
-            lastChangeCount = pb.changeCount
-            moveToTop(item)
+            write(raw, to: pb)
             return
         }
         switch item.kind {
@@ -203,13 +223,20 @@ final class ClipboardStore: ObservableObject {
         case .image:
             if let image = image(for: item) { pb.writeObjects([image]) }
         case .file:
-            let urls = (item.filePaths ?? []).map { NSURL(fileURLWithPath: $0) }
-            pb.writeObjects(urls)
+            pb.writeObjects((item.filePaths ?? []).map { NSURL(fileURLWithPath: $0) })
         case .other:
             break
         }
-        lastChangeCount = pb.changeCount
-        moveToTop(item)
+    }
+
+    private func write(_ raw: RawPasteboard, to pb: NSPasteboard) {
+        pb.writeObjects(raw.items.map { entries in
+            let pasteboardItem = NSPasteboardItem()
+            for entry in entries {
+                pasteboardItem.setData(entry.data, forType: NSPasteboard.PasteboardType(entry.type))
+            }
+            return pasteboardItem
+        })
     }
 
     private func moveToTop(_ item: ClipItem) {
@@ -220,23 +247,131 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
-    func togglePin(_ item: ClipItem) {
-        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items[idx].pinned.toggle()
-        save()
-    }
-
     func delete(_ item: ClipItem) {
         items.removeAll { $0.id == item.id }
         removeFiles(of: item)
         save()
     }
 
-    func clearUnpinned() {
-        for item in items where !item.pinned { removeFiles(of: item) }
-        items.removeAll { !$0.pinned }
+    /// クリップボードの履歴を消す（ピンボードの項目は残す）
+    func clearHistory() {
+        let removed = items.filter { $0.pinboardID == nil }
+        items.removeAll { $0.pinboardID == nil }
+        removed.forEach(removeFiles)
         save()
     }
+
+    // MARK: - ピンボード
+
+    @discardableResult
+    func createPinboard(name: String, color: Int? = nil) -> Pinboard {
+        let board = Pinboard(id: UUID(), name: name,
+                             color: color ?? Pinboard.palette[pinboards.count % Pinboard.palette.count])
+        pinboards.append(board)
+        savePinboards()
+        return board
+    }
+
+    func renamePinboard(_ board: Pinboard, to name: String) {
+        guard let idx = pinboards.firstIndex(where: { $0.id == board.id }) else { return }
+        pinboards[idx].name = name
+        savePinboards()
+    }
+
+    func deletePinboard(_ board: Pinboard) {
+        let removed = items.filter { $0.pinboardID == board.id }
+        items.removeAll { $0.pinboardID == board.id }
+        removed.forEach(removeFiles)
+        pinboards.removeAll { $0.id == board.id }
+        savePinboards()
+        save()
+    }
+
+    /// ピンボードに入っている内容 → そのピンボードの色（左のピンボードを優先）
+    func pinboardColorsBySignature() -> [String: Int] {
+        var result: [String: Int] = [:]
+        for board in pinboards {
+            for item in items where item.pinboardID == board.id && result[item.signature] == nil {
+                result[item.signature] = board.color
+            }
+        }
+        return result
+    }
+
+    /// 項目をピンボードに追加する（履歴の項目はそのまま残し、コピーを入れる）
+    func add(_ item: ClipItem, to board: Pinboard) {
+        guard !items.contains(where: { $0.pinboardID == board.id && $0.signature == item.signature }) else { return }
+        let copy = ClipItem(id: UUID(), kind: item.kind, text: item.text, imageName: item.imageName,
+                        filePaths: item.filePaths, rawName: duplicateRawFile(of: item), rawSize: item.rawSize,
+                        sourceAppName: item.sourceAppName, sourceBundleID: item.sourceBundleID,
+                        date: Date(), signature: item.signature, pinboardID: board.id, title: item.title)
+        // ピンボードの中では、追加したものが右端に並ぶ
+        items.append(copy)
+        save()
+    }
+
+    /// ⌘P: 履歴の項目は最初のピンボードに追加、ピンボードの項目はピンボードから外す
+    func togglePin(_ item: ClipItem) {
+        if item.pinboardID != nil {
+            delete(item)
+        } else {
+            add(item, to: pinboards.first ?? createPinboard(name: "ピン留め", color: Pinboard.palette[0]))
+        }
+    }
+
+    /// 旧バージョンでピン留めした項目を「ピン留め」ピンボードに移す
+    private func migratePinnedItems() {
+        guard items.contains(where: { $0.pinned && $0.pinboardID == nil }) else { return }
+        let board = pinboards.first { $0.name == "ピン留め" } ?? createPinboard(name: "ピン留め", color: Pinboard.palette[0])
+        for idx in items.indices where items[idx].pinned && items[idx].pinboardID == nil {
+            items[idx].pinboardID = board.id
+            items[idx].pinned = false
+        }
+        save()
+    }
+
+    // MARK: - Paste からの読み込み
+
+    /// 読み込み用の作業クリップボード（本物のクリップボードには触らない）
+    private lazy var importPasteboard = NSPasteboard(name: .init("jp.daisukeaboshi.copipe.import"))
+
+    /// 他のアプリの履歴を1件取り込む。同じ内容が既に同じ場所にあれば何もしない
+    @discardableResult
+    func importItem(raw: RawPasteboard, source: Source, date: Date, pinboard: Pinboard?, title: String?) -> Bool {
+        let pb = importPasteboard
+        pb.clearContents()
+        write(raw, to: pb)
+        guard let item = makeItem(from: pb, source: source, date: date, pinboardID: pinboard?.id, title: title)
+        else { return false }
+        if items.contains(where: { $0.pinboardID == item.pinboardID && $0.signature == item.signature }) {
+            removeRawFile(of: item)
+            return false
+        }
+        items.append(item)
+        return true
+    }
+
+    /// 読み込みが終わったら履歴を新しい順に並べ直して保存する
+    func finishImport() {
+        let history = items.filter { $0.pinboardID == nil }.sorted { $0.date > $1.date }
+        items = history + items.filter { $0.pinboardID != nil }
+        trim()
+        save()
+    }
+
+    /// 同じ名前のピンボードがあれば色を合わせて返し、なければ作る
+    func pinboard(named name: String, color: Int) -> Pinboard {
+        guard let idx = pinboards.firstIndex(where: { $0.name == name }) else {
+            return createPinboard(name: name, color: color)
+        }
+        if pinboards[idx].color != color {
+            pinboards[idx].color = color
+            savePinboards()
+        }
+        return pinboards[idx]
+    }
+
+    // MARK: - ファイル
 
     func image(for item: ClipItem) -> NSImage? {
         guard let name = item.imageName else { return nil }
@@ -261,6 +396,14 @@ final class ClipboardStore: ObservableObject {
         return try? PropertyListDecoder().decode(RawPasteboard.self, from: data)
     }
 
+    private func duplicateRawFile(of item: ClipItem) -> String? {
+        guard let name = item.rawName else { return nil }
+        let copy = UUID().uuidString + ".plist"
+        guard (try? FileManager.default.copyItem(at: rawDir.appendingPathComponent(name),
+                                                 to: rawDir.appendingPathComponent(copy))) != nil else { return nil }
+        return copy
+    }
+
     private func removeFiles(of item: ClipItem) {
         removeImageFile(of: item)
         removeRawFile(of: item)
@@ -282,14 +425,24 @@ final class ClipboardStore: ObservableObject {
     // MARK: - 保存
 
     private func load() {
-        guard let data = try? Data(contentsOf: historyURL),
-              let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) else { return }
-        items = decoded
+        if let data = try? Data(contentsOf: historyURL),
+           let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
+            items = decoded
+        }
+        if let data = try? Data(contentsOf: pinboardsURL),
+           let decoded = try? JSONDecoder().decode([Pinboard].self, from: data) {
+            pinboards = decoded
+        }
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? data.write(to: historyURL, options: .atomic)
+    }
+
+    private func savePinboards() {
+        guard let data = try? JSONEncoder().encode(pinboards) else { return }
+        try? data.write(to: pinboardsURL, options: .atomic)
     }
 }
 
@@ -334,7 +487,7 @@ enum Retention: String, CaseIterable, Identifiable {
     }
 
     static var current: Retention {
-        get { UserDefaults.standard.string(forKey: "retention").flatMap(Retention.init(rawValue:)) ?? .month }
+        get { UserDefaults.standard.string(forKey: "retention").flatMap(Retention.init(rawValue:)) ?? .forever }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "retention") }
     }
 }

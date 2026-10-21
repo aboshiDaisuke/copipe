@@ -42,6 +42,7 @@ final class SettingsModel: ObservableObject {
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var accessibilityGranted = Paster.isTrusted
     @Published var confirmClear = false
+    @Published var importMessage: String?
 }
 
 struct SettingsView: View {
@@ -78,9 +79,24 @@ struct SettingsView: View {
                 .onChange(of: model.retention) { store.setRetention(model.retention) }
 
                 HStack {
-                    Text("ピン留め以外の履歴 \(store.items.filter { !$0.pinned }.count) 件")
+                    Text("クリップボードの履歴 \(store.items.filter { $0.pinboardID == nil }.count) 件")
                     Spacer()
                     Button("履歴を消去…") { model.confirmClear = true }
+                }
+            }
+
+            Section("Paste から引っ越す") {
+                HStack {
+                    Text("Paste の履歴とピンボードを読み込みます。Paste のデータは変更しません。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("読み込む…") {
+                        model.importMessage = PasteImporter.summary(of: Result { try PasteImporter.run(into: store) })
+                    }
+                }
+                if let message = model.importMessage {
+                    Text(message).font(.system(size: 12))
                 }
             }
 
@@ -103,9 +119,9 @@ struct SettingsView: View {
             model.accessibilityGranted = Paster.isTrusted
         }
         .confirmationDialog("履歴を消去しますか？", isPresented: $model.confirmClear) {
-            Button("消去", role: .destructive) { store.clearUnpinned() }
+            Button("消去", role: .destructive) { store.clearHistory() }
         } message: {
-            Text("ピン留めした項目は残ります。元に戻せません。")
+            Text("ピンボードの項目は残ります。元に戻せません。")
         }
     }
 }
@@ -158,8 +174,8 @@ enum HelpText {
     書式なしで貼り付け　shift + return
     すぐ貼り付け　command + 1〜9
     探す　そのまま文字を打つ
-    種類の絞り込み　tab
-    ピン留め　command + P
+    クリップボード・ピンボードの切り替え　command + ← →（tab でも可）
+    ピンボードに追加 / 外す　command + P
     削除　command + delete
     閉じる　esc
     """

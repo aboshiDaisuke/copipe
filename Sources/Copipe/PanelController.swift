@@ -10,6 +10,8 @@ final class KeyPanel: NSPanel {
 final class PanelModel: ObservableObject {
     @Published var query = "" { didSet { selection = 0 } }
     @Published var filter: ClipFilter = .all { didSet { selection = 0 } }
+    /// 表示中のピンボード（nil ならクリップボードの履歴）
+    @Published var board: UUID? { didSet { selection = 0 } }
     @Published var selection = 0
     @Published var showToken = 0
     @Published var accessibilityGranted = true
@@ -17,7 +19,7 @@ final class PanelModel: ObservableObject {
 
     func visibleItems(in items: [ClipItem]) -> [ClipItem] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        return items.filter { filter.matches($0) && $0.matches(query: q) }
+        return items.filter { $0.pinboardID == board && filter.matches($0) && $0.matches(query: q) }
     }
 }
 
@@ -50,6 +52,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         let view = PanelView(store: store, model: model,
                              onPaste: { [weak self] in self?.paste($0) },
                              onMenu: { [weak self] in self?.showActionMenu() },
+                             onNewPinboard: { [weak self] in self?.newPinboard(adding: $0) },
+                             onRenamePinboard: { [weak self] in self?.renamePinboard($0) },
+                             onDeletePinboard: { [weak self] in self?.deletePinboard($0) },
                              onOpenSettings: { Paster.openAccessibilitySettings() })
         panel.contentView = NSHostingView(rootView: view)
     }
@@ -58,9 +63,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.isVisible ? hide() : show()
     }
 
-    func show() {
+    func show(board: UUID? = nil) {
         model.query = ""
         model.filter = .all
+        model.board = board
         model.selection = 0
         model.accessibilityGranted = Paster.isTrusted
         model.commandHeld = false
@@ -116,6 +122,53 @@ final class PanelController: NSObject, NSWindowDelegate {
         actionMenu?.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
+    // MARK: - ピンボード
+
+    /// 新しいピンボードを作る。item を渡すと、その項目を入れる
+    private func newPinboard(adding item: ClipItem?) {
+        guard let name = askName(title: "新しいピンボード", button: "作成") else { return }
+        let board = store.createPinboard(name: name)
+        if let item { store.add(item, to: board) }
+        show(board: board.id)
+    }
+
+    private func renamePinboard(_ board: Pinboard) {
+        guard let name = askName(title: "ピンボードの名前を変更", initial: board.name, button: "変更") else { return }
+        store.renamePinboard(board, to: name)
+        show(board: board.id)
+    }
+
+    private func deletePinboard(_ board: Pinboard) {
+        hide()
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = "ピンボード「\(board.name)」を削除しますか？"
+        alert.informativeText = "中の項目もすべて削除されます。元に戻せません。"
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        if alert.runModal() == .alertFirstButtonReturn {
+            store.deletePinboard(board)
+        }
+        show()
+    }
+
+    private func askName(title: String, initial: String = "", button: String) -> String? {
+        hide()
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = title
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = initial
+        field.placeholderString = "名前"
+        alert.accessoryView = field
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "キャンセル")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
+
     private func paste(_ item: ClipItem, plainText: Bool = false) {
         store.copyToPasteboard(item, plainText: plainText)
         hide()
@@ -140,6 +193,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// 隣のタブ（クリップボード・ピンボード）に移る。端まで行ったら反対側に戻る
+    private func switchBoard(by step: Int) {
+        let tabs: [UUID?] = [nil] + store.pinboards.map(\.id)
+        let current = tabs.firstIndex(of: model.board) ?? 0
+        model.board = tabs[(current + step + tabs.count) % tabs.count]
+    }
+
     /// 処理したら true（検索欄には渡さない）
     private func handle(_ event: NSEvent) -> Bool {
         let items = model.visibleItems(in: store.items)
@@ -150,6 +210,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         case 53: // esc
             if model.query.isEmpty { hide() } else { model.query = "" }
             return true
+        case 123 where command, 124 where command: // ⌘← ⌘→ でクリップボードとピンボードを切り替え
+            switchBoard(by: event.keyCode == 123 ? -1 : 1)
+            return true
         case 123: // ←
             model.selection = max(0, model.selection - 1)
             return true
@@ -159,11 +222,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         case 36, 76: // return / enter（shift 付きなら書式なしの文字だけ）
             if let selected { paste(selected, plainText: event.modifierFlags.contains(.shift)) }
             return true
-        case 48: // tab で絞り込みを切り替え
-            let all = ClipFilter.allCases
-            let current = all.firstIndex(of: model.filter) ?? 0
-            let step = event.modifierFlags.contains(.shift) ? all.count - 1 : 1
-            model.filter = all[(current + step) % all.count]
+        case 48: // tab でも切り替え
+            switchBoard(by: event.modifierFlags.contains(.shift) ? -1 : 1)
             return true
         case 51 where command: // ⌘⌫
             if let selected {
