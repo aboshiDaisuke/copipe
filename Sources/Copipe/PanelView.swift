@@ -1,13 +1,23 @@
 import AppKit
 import QuickLookThumbnailing
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// カードの右クリックメニューの項目
+enum CardAction {
+    case paste, pastePlain, copy, copyPlain
+    case preview, edit, rename, duplicate
+    case open, openWith(URL), reveal
+    case addTo(Pinboard), newPinboard
+    case delete
+}
 
 struct PanelView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var model: PanelModel
-    var onPaste: (ClipItem) -> Void
+    var onAction: (CardAction, ClipItem) -> Void
     var onMenu: () -> Void
-    var onNewPinboard: (ClipItem?) -> Void
+    var onNewPinboard: () -> Void
     var onRenamePinboard: (Pinboard) -> Void
     var onDeletePinboard: (Pinboard) -> Void
     var onOpenSettings: () -> Void
@@ -18,7 +28,7 @@ struct PanelView: View {
         let items = model.visibleItems(in: store.items)
         VStack(spacing: 10) {
             topBar
-            if !model.accessibilityGranted { accessibilityBanner }
+            if !model.accessibilityGranted && Preferences.pasteToActiveApp { accessibilityBanner }
             if items.isEmpty {
                 emptyState
             } else {
@@ -43,7 +53,7 @@ struct PanelView: View {
             HStack {
                 searchField
                 Spacer()
-                kindMenu
+                filterMenu
                 Button(action: onMenu) {
                     Image(systemName: "ellipsis.circle")
                         .font(.system(size: 16))
@@ -62,10 +72,18 @@ struct PanelView: View {
                     }
                     .contextMenu {
                         Button("名前を変更…") { onRenamePinboard(board) }
+                        Menu("色") {
+                            ForEach(Pinboard.palette.indices, id: \.self) { i in
+                                checkButton(Pinboard.paletteNames[i], on: board.color == Pinboard.palette[i]) {
+                                    store.setColor(of: board, to: Pinboard.palette[i])
+                                }
+                            }
+                        }
+                        Divider()
                         Button("削除…", role: .destructive) { onDeletePinboard(board) }
                     }
                 }
-                Button { onNewPinboard(nil) } label: {
+                Button(action: onNewPinboard) {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
@@ -109,24 +127,45 @@ struct PanelView: View {
         .buttonStyle(.plain)
     }
 
-    private var kindMenu: some View {
-        Menu {
-            ForEach([ClipFilter.all, .text, .link, .image, .file, .other]) { filter in
-                Button {
-                    model.filter = filter
-                } label: {
-                    if model.filter == filter {
-                        Label(filter.rawValue, systemImage: "checkmark")
-                    } else {
-                        Text(filter.rawValue)
-                    }
+    private func checkButton(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            if on {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
+    /// 種類・アプリ・日付で絞り込む（Paste の検索フィルターと同じ）
+    private var filterMenu: some View {
+        let apps = appChoices
+        return Menu {
+            Section("種類") {
+                ForEach(ClipFilter.allCases) { filter in
+                    checkButton(filter.rawValue, on: model.filter == filter) { model.filter = filter }
                 }
+            }
+            Section("アプリ") {
+                checkButton("すべてのアプリ", on: model.app == nil) { model.app = nil }
+                ForEach(apps, id: \.id) { app in
+                    checkButton(app.name, on: model.app == app.id) { model.app = app.id }
+                }
+            }
+            Section("日付") {
+                ForEach(DateFilter.allCases) { date in
+                    checkButton(date.rawValue, on: model.date == date) { model.date = date }
+                }
+            }
+            if model.isFiltered {
+                Divider()
+                Button("絞り込みを解除") { model.clearFilters() }
             }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "line.3.horizontal.decrease")
-                if model.filter != .all {
-                    Text(model.filter.rawValue)
+                if model.isFiltered {
+                    Text(filterSummary(apps))
                 }
             }
             .font(.system(size: 13, weight: .medium))
@@ -134,7 +173,25 @@ struct PanelView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("種類で絞り込み（tab）")
+        .help("種類・アプリ・日付で絞り込み")
+    }
+
+    /// 今のタブの履歴にあるアプリ（多い順）
+    private var appChoices: [(id: String, name: String)] {
+        var counts: [String: (name: String, count: Int)] = [:]
+        for item in store.items where item.pinboardID == model.board {
+            guard let id = item.sourceBundleID else { continue }
+            counts[id, default: (item.sourceAppName ?? id, 0)].count += 1
+        }
+        return counts.sorted { $0.value.count > $1.value.count }.prefix(15).map { ($0.key, $0.value.name) }
+    }
+
+    private func filterSummary(_ apps: [(id: String, name: String)]) -> String {
+        var parts: [String] = []
+        if model.filter != .all { parts.append(model.filter.rawValue) }
+        if let app = model.app { parts.append(apps.first { $0.id == app }?.name ?? "アプリ") }
+        if model.date != .all { parts.append(model.date.rawValue) }
+        return parts.joined(separator: "・")
     }
 
     private var accessibilityBanner: some View {
@@ -159,7 +216,7 @@ struct PanelView: View {
     }
 
     private var emptyMessage: String {
-        if !model.query.isEmpty || model.filter != .all { return "見つかりませんでした" }
+        if !model.query.isEmpty || model.isFiltered { return "見つかりませんでした" }
         if model.board != nil { return "このピンボードは空です。カードを右クリックして「ピンボードに追加」で入れられます。" }
         return "まだ履歴がありません。何かコピーしてみてください。"
     }
@@ -172,29 +229,24 @@ struct PanelView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 16) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        ClipCard(item: item, index: index, selected: index == model.selection,
+                        ClipCard(item: item, index: index, selected: model.isSelected(item, at: index),
                                  showShortcut: model.commandHeld, tagColor: tagColors[item.signature], store: store)
                             .id(item.id)
-                            .onTapGesture(count: 2) { onPaste(item) }
-                            .onTapGesture { model.selection = index }
-                            .contextMenu {
-                                Button("貼り付け") { onPaste(item) }
-                                Menu("ピンボードに追加") {
-                                    ForEach(store.pinboards) { board in
-                                        Button(board.name) { store.add(item, to: board) }
-                                    }
-                                    if !store.pinboards.isEmpty { Divider() }
-                                    Button("新しいピンボード…") { onNewPinboard(item) }
-                                }
-                                Divider()
-                                Button(item.pinboardID == nil ? "削除" : "ピンボードから削除", role: .destructive) {
-                                    store.delete(item)
-                                }
-                            }
+                            .onTapGesture(count: 2) { onAction(.paste, item) }
+                            .onTapGesture { model.click(index, in: items) }
+                            // 引っぱり出しは PanelController が AppKit で始める（カードの位置をここで知らせる）
+                            .background(GeometryReader { geo in
+                                Color.clear.preference(key: CardFrames.self, value: [item.id: geo.frame(in: .global)])
+                            })
+                            .onDrop(of: [ReorderDrop.type, .item], delegate: ReorderDrop(target: item, model: model, store: store))
+                            .contextMenu { cardMenu(item) }
                     }
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)
+            }
+            .onPreferenceChange(CardFrames.self) { frames in
+                MainActor.assumeIsolated { model.cardFrames = frames }
             }
             .onChange(of: model.selection) {
                 guard items.indices.contains(model.selection) else { return }
@@ -206,6 +258,110 @@ struct PanelView: View {
                 }
             }
         }
+    }
+
+    /// 右クリックメニュー（Paste と同じ項目）。まとめて選んでいるカードなら、選んだもの全部に効く
+    @ViewBuilder
+    private func cardMenu(_ item: ClipItem) -> some View {
+        let count = model.marked.contains(item.id) ? model.marked.count : 1
+        let suffix = count > 1 ? "（\(count) 件）" : ""
+        Button("貼り付け" + suffix) { onAction(.paste, item) }
+        if item.text != nil {
+            Button("書式なしで貼り付け" + suffix) { onAction(.pastePlain, item) }
+        }
+        Button("コピー" + suffix) { onAction(.copy, item) }
+        if item.text != nil {
+            Button("書式なしでコピー" + suffix) { onAction(.copyPlain, item) }
+        }
+        Divider()
+        Button("プレビュー") { onAction(.preview, item) }
+        if item.text != nil {
+            Button("編集…") { onAction(.edit, item) }
+        }
+        Button("名前を変更…") { onAction(.rename, item) }
+        Button("複製" + suffix) { onAction(.duplicate, item) }
+        if let url = item.openURL {
+            Divider()
+            Button(item.kind == .link ? "ブラウザで開く" : "開く") { onAction(.open, item) }
+            Menu("アプリで開く") {
+                ForEach(NSWorkspace.shared.urlsForApplications(toOpen: url).prefix(12), id: \.self) { app in
+                    Button(FileManager.default.displayName(atPath: app.path)) { onAction(.openWith(app), item) }
+                }
+            }
+            if item.kind == .file {
+                Button("Finder で表示") { onAction(.reveal, item) }
+            }
+        }
+        shareLink(item)
+        Divider()
+        Menu("ピンボードに追加" + suffix) {
+            ForEach(store.pinboards) { board in
+                Button(board.name) { onAction(.addTo(board), item) }
+            }
+            if !store.pinboards.isEmpty { Divider() }
+            Button("新しいピンボード…") { onAction(.newPinboard, item) }
+        }
+        Divider()
+        Button((item.pinboardID == nil ? "削除" : "ピンボードから削除") + suffix, role: .destructive) {
+            onAction(.delete, item)
+        }
+    }
+
+    @ViewBuilder
+    private func shareLink(_ item: ClipItem) -> some View {
+        switch item.kind {
+        case .text:
+            ShareLink("シェア", item: item.text ?? "")
+        case .link:
+            if let url = item.openURL { ShareLink("シェア", item: url) }
+        case .image:
+            if let url = store.imageURL(for: item) { ShareLink("シェア", item: url) }
+        case .file:
+            ShareLink("シェア", items: (item.filePaths ?? []).map { URL(fileURLWithPath: $0) })
+        case .other:
+            EmptyView()
+        }
+    }
+}
+
+/// 見えているカードの位置（パネルの左上からの座標）
+struct CardFrames: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// ピンボードの中で、カードを引っぱって並べ替える
+struct ReorderDrop: DropDelegate {
+    /// 並べ替え用の印の種類（Info.plist にも登録してある）
+    static let type = UTType(exportedAs: "jp.daisukeaboshi.copipe.item", conformingTo: .data)
+
+    let target: ClipItem
+    let model: PanelModel
+    let store: ClipboardStore
+
+    func validateDrop(info: DropInfo) -> Bool {
+        model.dragging != nil && target.pinboardID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged = model.dragging, dragged != target.id, target.pinboardID != nil else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            store.move(dragged, to: target.id)
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) { store.move(dragged, to: target.id) }
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        model.dragging = nil
+        return true
     }
 }
 
@@ -248,7 +404,7 @@ struct ClipCard: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                 Text(Date().timeIntervalSince(item.date) < 60
                      ? "たった今" : Self.relative.localizedString(for: item.date, relativeTo: Date()))
                     .font(.system(size: 12))
@@ -279,80 +435,66 @@ struct ClipCard: View {
         return AppAppearance.nsColor(for: item.sourceBundleID)
     }
 
-    private var title: String {
-        if let title = item.title { return title }
-        if item.kind == .file, let count = item.filePaths?.count, count > 1 {
-            return "\(count) 個のファイル"
-        }
-        return item.kind.label
-    }
-
     @ViewBuilder
     private var content: some View {
-        switch item.kind {
-        case .text:
-            Text(item.text ?? "")
-                .font(.system(size: 13))
-                .lineSpacing(2)
-                .padding(12)
-        case .link:
-            VStack(alignment: .leading, spacing: 8) {
-                ZStack {
-                    Color.primary.opacity(0.05)
-                    Image(systemName: "globe")
-                        .font(.system(size: 40, weight: .light))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(height: 96)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(URL(string: item.text ?? "")?.host ?? "")
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    Text(item.text ?? "")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                }
-                .padding(.horizontal, 12)
+        if let rgb = item.colorValue {
+            // 色の見本
+            ZStack {
+                Color(rgb: rgb)
+                Text(rgb.hexColor)
+                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(AppAppearance.textColor(on: NSColor(rgb: rgb)))
             }
-        case .image:
-            if let image = store.image(for: item) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: Self.width, height: Self.bodyHeight)
-                    .clipped()
-            }
-        case .file:
-            let paths = item.filePaths ?? []
-            // 複数のときは1つ目のサムネイルを出す（件数は下に表示）
-            if let first = paths.first {
-                FileThumbnail(path: first, cache: .shared)
-            }
-        case .other:
-            VStack(spacing: 10) {
-                if let icon = AppAppearance.icon(for: item.sourceBundleID) {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 88, height: 88)
-                } else {
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 56, weight: .light))
-                        .foregroundStyle(.secondary)
-                }
-                Text("\(item.sourceAppName ?? "アプリ") の素材")
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(12)
             .frame(width: Self.width, height: Self.bodyHeight)
+        } else {
+            switch item.kind {
+            case .text:
+                // カードに見えるのは数行なので、長い文章は先頭だけ描く
+                Text(String((item.text ?? "").prefix(1_200)))
+                    .font(.system(size: 13))
+                    .lineSpacing(2)
+                    .padding(12)
+            case .link:
+                LinkCardBody(link: item.text ?? "", previews: .shared)
+            case .image:
+                if let image = store.image(for: item) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: Self.width, height: Self.bodyHeight)
+                        .clipped()
+                }
+            case .file:
+                let paths = item.filePaths ?? []
+                // 複数のときは1つ目のサムネイルを出す（件数は下に表示）
+                if let first = paths.first {
+                    FileThumbnail(path: first, cache: .shared)
+                }
+            case .other:
+                VStack(spacing: 10) {
+                    if let icon = AppAppearance.icon(for: item.sourceBundleID) {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 88, height: 88)
+                    } else {
+                        Image(systemName: "shippingbox")
+                            .font(.system(size: 56, weight: .light))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("\(item.sourceAppName ?? "アプリ") の素材")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .frame(width: Self.width, height: Self.bodyHeight)
+            }
         }
     }
 
     private var footer: some View {
         HStack {
-            Text(detail)
+            Text(Self.detail(of: item, store: store))
             Spacer()
             if showShortcut && index < 9 {
                 Text("⌘\(index + 1)").fontWeight(.semibold)
@@ -364,16 +506,19 @@ struct ClipCard: View {
         .frame(width: Self.width, height: Self.footerHeight)
     }
 
-    private var detail: String {
+    /// カードの下・プレビューの右上に出す説明（文字数・大きさ・ファイル名など）
+    static func detail(of item: ClipItem, store: ClipboardStore) -> String {
+        if let rgb = item.colorValue { return rgb.hexColor }
         switch item.kind {
-        case .text: "\(item.text?.count ?? 0) 文字"
-        case .link: URL(string: item.text ?? "")?.host ?? ""
+        case .text: return "\(item.text?.count ?? 0) 文字"
+        case .link: return URL(string: item.text ?? "")?.host ?? ""
         case .image:
-            if let size = store.image(for: item)?.pixelSize { "\(Int(size.width)) × \(Int(size.height))" } else { "" }
+            if let size = store.image(for: item)?.pixelSize { return "\(Int(size.width)) × \(Int(size.height))" }
+            return ""
         case .file:
-            if let paths = item.filePaths, paths.count == 1 { (paths[0] as NSString).lastPathComponent }
-            else { "\(item.filePaths?.count ?? 0) 項目" }
-        case .other: ByteCountFormatter.string(fromByteCount: Int64(item.rawSize ?? 0), countStyle: .file)
+            if let paths = item.filePaths, paths.count == 1 { return (paths[0] as NSString).lastPathComponent }
+            return "\(item.filePaths?.count ?? 0) 項目"
+        case .other: return ByteCountFormatter.string(fromByteCount: Int64(item.rawSize ?? 0), countStyle: .file)
         }
     }
 
@@ -383,6 +528,42 @@ struct ClipCard: View {
         f.unitsStyle = .full
         return f
     }()
+}
+
+/// リンクのカード：ページの画像と題名（取れるまでは地球のマーク）
+struct LinkCardBody: View {
+    let link: String
+    @ObservedObject var previews: LinkPreviews
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                Color.primary.opacity(0.05)
+                if let image = previews.image(for: link) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "globe")
+                        .font(.system(size: 40, weight: .light))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: ClipCard.width, height: 106)
+            .clipped()
+            VStack(alignment: .leading, spacing: 3) {
+                Text(previews.title(for: link) ?? URL(string: link)?.host ?? "")
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(2)
+                Text(link)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 12)
+        }
+        .onAppear { previews.request(link) }
+    }
 }
 
 /// ウィンドウの後ろを透かすすりガラス背景

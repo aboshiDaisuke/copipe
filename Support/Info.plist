@@ -24,5 +24,18 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>jp.daisukeaboshi.copipe.item</string>
+            <key>UTTypeDescription</key>
+            <string>Copipe のカード</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
