@@ -31,6 +31,17 @@ enum TextTransform: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// option + return のメニューに出す名前
+    var pasteTitle: String {
+        switch self {
+        case .removeLineBreaks: "改行を消して貼り付け"
+        case .toHalfWidth: "英数字を半角にして貼り付け"
+        case .toFullWidth: "英数字を全角にして貼り付け"
+        case .trim: "前後の空白を取って貼り付け"
+        case .quote: "「」で囲んで貼り付け"
+        }
+    }
+
     func apply(_ text: String) -> String {
         switch self {
         case .removeLineBreaks:

@@ -350,7 +350,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard list.contains(where: { $0.text != nil }), let view = panel.contentView else { return }
         let menu = NSMenu()
         for transform in TextTransform.allCases {
-            let entry = NSMenuItem(title: transform.rawValue + "して貼り付け", action: #selector(pasteTransformedFromMenu(_:)),
+            let entry = NSMenuItem(title: transform.pasteTitle, action: #selector(pasteTransformedFromMenu(_:)),
                                    keyEquivalent: "")
             entry.target = self
             entry.representedObject = transform.rawValue
