@@ -94,14 +94,25 @@ enum TextTemplate {
             return f.string(from: date)
         }
         let day: (Int) -> Date = { calendar.date(byAdding: .day, value: $0, to: now) ?? now }
-        let values: [String: String] = [
-            "{今日}": format("y年M月d日", now), "{明日}": format("y年M月d日", day(1)), "{昨日}": format("y年M月d日", day(-1)),
-            "{日付}": format("yyyy/MM/dd", now), "{曜日}": format("EEEEE", now), "{時刻}": format("H:mm", now),
-            "{年}": format("y", now), "{月}": format("M", now), "{日}": format("d", now),
+        // 書いてある差し込みの分だけ日付を作る
+        let values: [String: () -> String] = [
+            "{今日}": { format("y年M月d日", now) }, "{明日}": { format("y年M月d日", day(1)) },
+            "{昨日}": { format("y年M月d日", day(-1)) }, "{日付}": { format("yyyy/MM/dd", now) },
+            "{曜日}": { format("EEEEE", now) }, "{時刻}": { format("H:mm", now) },
+            "{年}": { format("y", now) }, "{月}": { format("M", now) }, "{日}": { format("d", now) },
         ]
         var result = text
-        for (key, value) in values { result = result.replacingOccurrences(of: key, with: value) }
+        for (key, value) in values where result.contains(key) {
+            result = result.replacingOccurrences(of: key, with: value())
+        }
         return result
+    }
+}
+
+extension ClipItem {
+    /// 貼り付けるときの文字（{今日} などの差し込みは置き換える）
+    var expandedText: String? {
+        text.map { TextTemplate.expandIfNeeded($0) ?? $0 }
     }
 }
 

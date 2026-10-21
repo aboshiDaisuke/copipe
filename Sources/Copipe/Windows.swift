@@ -181,18 +181,18 @@ struct SettingsView: View {
             }
 
             Section {
-                ForEach($model.autoRules) { $rule in
+                ForEach(model.autoRules) { rule in
                     HStack(spacing: 6) {
-                        Picker("", selection: $rule.app) {
+                        Picker("", selection: ruleBinding(rule.id, \.app)) {
                             Text("どのアプリでも").tag(String?.none)
                             ForEach(appChoices(including: rule.app), id: \.id) { Text($0.name).tag(String?.some($0.id)) }
                         }
-                        Picker("", selection: $rule.kind) {
+                        Picker("", selection: ruleBinding(rule.id, \.kind)) {
                             Text("どの種類でも").tag(String?.none)
                             ForEach(ClipFilter.allCases.filter { $0 != .all }) { Text($0.rawValue).tag(String?.some($0.rawValue)) }
                         }
                         Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                        Picker("", selection: $rule.board) {
+                        Picker("", selection: ruleBinding(rule.id, \.board)) {
                             Text("ピンボードを選ぶ").tag(UUID?.none)
                             ForEach(store.pinboards) { Text($0.name).tag(UUID?.some($0.id)) }
                         }
@@ -287,6 +287,17 @@ struct SettingsView: View {
                 model.ignoredApps.append(id)
             }
         }
+    }
+
+    /// 決まりの1項目を id で読み書きする（消した直後に古い位置を読んで落ちないように）
+    private func ruleBinding<Value: ExpressibleByNilLiteral>(_ id: UUID,
+                                                             _ keyPath: WritableKeyPath<AutoRule, Value>) -> Binding<Value> {
+        Binding(
+            get: { model.autoRules.first { $0.id == id }?[keyPath: keyPath] ?? nil },
+            set: { value in
+                guard let idx = model.autoRules.firstIndex(where: { $0.id == id }) else { return }
+                model.autoRules[idx][keyPath: keyPath] = value
+            })
     }
 
     /// 決まりで選べるアプリ（履歴にあるアプリ。今選んでいるものは必ず入れる）

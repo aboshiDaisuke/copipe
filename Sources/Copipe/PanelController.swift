@@ -239,9 +239,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        // 編集中はプレビューがキーウインドウになるので、パネルを閉じない
-        if notification.object as? NSWindow === panel, model.editing != nil { return }
         // パネルにもプレビューにも戻っていなければ（他のアプリを押したら）閉じる
+        // 編集を始めてプレビューがキーになったときは、ここでプレビューがキーなので閉じない
         DispatchQueue.main.async {
             if !self.panel.isKeyWindow && !self.preview.isKeyWindow { self.hide() }
         }
@@ -327,7 +326,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     /// 「整えて貼り付け」: 文字を整えて、書式なしで貼り付ける
     private func paste(_ list: [ClipItem], transform: TextTransform) {
-        let texts = list.compactMap { $0.text.map { TextTemplate.expandIfNeeded($0) ?? $0 } }
+        let texts = list.compactMap(\.expandedText)
         guard !texts.isEmpty else { return }
         store.copyString(transform.apply(texts.joined(separator: "\n")))
         hide()
@@ -582,9 +581,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         model.board = tabs[(current + step + tabs.count) % tabs.count]
     }
 
-    /// 処理したら true（検索欄には渡さない）
     /// 編集中のプレビューでのキー（esc で取り消し、⌘S・⌘return で保存）。処理したら true
     private func handleEditing(_ event: NSEvent) -> Bool {
+        // 日本語の変換中は esc・return を入力メソッドに渡す（変換の取り消しで編集ごと消えないように）
+        if (preview.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return false }
         let command = event.modifierFlags.contains(.command)
         switch Int(event.keyCode) {
         case 53:
@@ -594,14 +594,27 @@ final class PanelController: NSObject, NSWindowDelegate {
             finishEdit(save: true)
             return true
         default:
-            if command && event.charactersIgnoringModifiers?.lowercased() == "s" {
+            guard command else { return false }
+            let shift = event.modifierFlags.contains(.shift)
+            // メニューバーのないアプリなので、⌘C・⌘V などの編集操作はここで文字欄に送る
+            let action: Selector
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "s":
                 finishEdit(save: true)
                 return true
+            case "x": action = #selector(NSText.cut(_:))
+            case "c": action = #selector(NSText.copy(_:))
+            case "v": action = #selector(NSText.paste(_:))
+            case "a": action = #selector(NSText.selectAll(_:))
+            case "z": action = shift ? Selector(("redo:")) : Selector(("undo:"))
+            default: return false
             }
-            return false
+            NSApp.sendAction(action, to: nil, from: self)
+            return true
         }
     }
 
+    /// 処理したら true（検索欄には渡さない）
     private func handle(_ event: NSEvent) -> Bool {
         let items = model.visibleItems(in: store.items)
         let selected = model.selectedItems(in: items)

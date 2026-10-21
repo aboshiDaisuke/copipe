@@ -59,9 +59,11 @@ enum DataTransfer {
         let errors = Pipe()
         process.standardError = errors
         try process.run()
+        // 先に読み切る（エラーの出力がパイプにたまりきると、終わるのを待ったまま止まってしまう）
+        let output = errors.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let message = String(data: output, encoding: .utf8) ?? ""
             throw TransferError.failed("うまくいきませんでした。\(message)")
         }
     }

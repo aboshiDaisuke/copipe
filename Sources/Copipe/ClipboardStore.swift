@@ -258,7 +258,7 @@ final class ClipboardStore: ObservableObject {
         let pb = NSPasteboard.general
         pb.clearContents()
         if list.allSatisfy({ $0.text != nil }) {
-            let texts = list.compactMap { $0.text.map { TextTemplate.expandIfNeeded($0) ?? $0 } }
+            let texts = list.compactMap(\.expandedText)
             pb.setString(texts.joined(separator: "\n"), forType: .string)
         } else {
             pb.writeObjects(list.flatMap { pasteboardItems(for: $0, plainText: plainText) })
@@ -421,6 +421,8 @@ final class ClipboardStore: ObservableObject {
 
         let old = items[idx]
         let hash = Self.hash(png)
+        // 回しても同じ絵（上下左右対称の画像）なら何もしない。続けると今のファイルを消してしまう
+        guard hash + ".png" != old.imageName else { return }
         let url = imagesDir.appendingPathComponent(hash + ".png")
         if !FileManager.default.fileExists(atPath: url.path) { try? png.write(to: url) }
         removeRawFile(of: old)
@@ -448,23 +450,36 @@ final class ClipboardStore: ObservableObject {
     }
 
     private var recognizing = false
+    /// 読み取り終わって、まだ履歴に入れていない文字（画像のファイル名 → 文字）
+    private var recognized: [String: String] = [:]
 
     /// まだ文字を読み取っていない画像を、1つずつ順に読む
+    /// 1枚ごとに履歴を書き換えると画面を毎回描き直すので、10枚ずつ（か、読むものがなくなったら）まとめて入れる
     private func recognizeNextImage() {
-        guard !recognizing,
-              let item = items.first(where: { $0.kind == .image && $0.ocrText == nil && $0.imageName != nil }),
-              let url = imageURL(for: item) else { return }
+        guard !recognizing else { return }
+        guard let item = items.first(where: {
+            $0.kind == .image && $0.ocrText == nil && $0.imageName.map { recognized[$0] == nil } == true
+        }), let name = item.imageName, let url = imageURL(for: item) else {
+            applyRecognized()
+            return
+        }
         recognizing = true
         Task {
-            let text = await TextRecognizer.recognize(imageAt: url)
+            recognized[name] = await TextRecognizer.recognize(imageAt: url)
             recognizing = false
-            // 同じ画像（ピンボードに入れたものなど）にはまとめて入れる
-            for idx in items.indices where items[idx].imageName == item.imageName {
-                items[idx].ocrText = text
-            }
-            scheduleSave()
+            if recognized.count >= 10 { applyRecognized() }
             recognizeNextImage()
         }
+    }
+
+    private func applyRecognized() {
+        guard !recognized.isEmpty else { return }
+        // 同じ画像（ピンボードに入れたものなど）にはまとめて入れる
+        for idx in items.indices {
+            if let name = items[idx].imageName, let text = recognized[name] { items[idx].ocrText = text }
+        }
+        recognized = [:]
+        scheduleSave()
     }
 
     private var saveScheduled = false
