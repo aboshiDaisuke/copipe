@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "scripts": {
     "studio": "npm run bgm && remotion studio",
-    "bgm": "python3 scripts/make_bgm.py public/bgm.wav 78",
+    "bgm": "python3 scripts/make_bgm.py public/bgm.wav 80",
     "render": "npm run bgm && remotion render src/index.ts CopipeTutorial out/copipe-tutorial.mp4 --gl=angle --codec=h264 --crf=18"
   },
   "dependencies": {

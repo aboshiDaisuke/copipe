@@ -40,7 +40,7 @@ export const CopipeTutorial: React.FC = () => {
 				<AbsoluteFill style={{background: 'linear-gradient(rgba(6,8,26,0.8), rgba(6,8,26,0.35) 30%, transparent 55%)'}} />
 			</Sequence>
 			{sequences}
-			<Audio src={staticFile('bgm.wav')} volume={(f) => interpolate(f, [0, 20, TOTAL - 45, TOTAL], [0, 0.8, 0.8, 0], clamp)} />
+			<Audio src={staticFile('bgm.wav')} volume={(f) => interpolate(f, [TOTAL - 30, TOTAL], [0.85, 0], clamp)} />
 		</AbsoluteFill>
 	);
 };

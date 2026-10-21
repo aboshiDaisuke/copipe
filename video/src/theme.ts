@@ -20,3 +20,7 @@ export const colors = {
 };
 
 export const FPS = 30;
+
+/** BGM は 150 BPM。1 拍 = 12 フレーム、1 小節 = 48 フレーム */
+export const BEAT = 12;
+export const BAR = BEAT * 4;

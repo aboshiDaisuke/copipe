@@ -1,14 +1,16 @@
 import {ThreeCanvas} from '@remotion/three';
 import {useThree} from '@react-three/fiber';
 import React, {useMemo} from 'react';
-import {interpolate, spring, useCurrentFrame, useVideoConfig} from 'remotion';
+import {Easing, interpolate, spring, useCurrentFrame, useVideoConfig} from 'remotion';
 import * as THREE from 'three';
-import {clamp, palette} from '../theme';
+import {BAR, clamp, palette} from '../theme';
 
-/** 宇宙に浮かぶカード。intro は奥から飛んでくる、outro は並んで整列する、background はゆっくり漂う */
+/** 宇宙に浮かぶカード。intro はカメラが突っ込んでいって BGM のドロップではじける、outro は並んで整列する、background はゆっくり漂う */
 export type SpaceMode = 'intro' | 'background' | 'outro';
 
 const CARD_COUNT = 30;
+/** intro でカードがはじけるフレーム（BGM のドロップ） */
+const DROP = BAR * 2;
 
 /** 毎回同じ並びになる乱数 */
 const seeded = (seed: number) => {
@@ -83,7 +85,9 @@ const CameraRig: React.FC<{mode: SpaceMode}> = ({mode}) => {
 	const {camera} = useThree();
 	const z =
 		mode === 'intro'
-			? interpolate(frame, [0, 150], [16, 11], clamp)
+			? frame < DROP
+				? interpolate(frame, [0, DROP], [40, 12], {...clamp, easing: Easing.in(Easing.quad)})
+				: interpolate(frame, [DROP, DROP + 96], [12, 10.5], clamp)
 			: mode === 'outro'
 				? interpolate(frame, [0, 240], [13, 11.5], clamp)
 				: 12;
@@ -123,10 +127,12 @@ const Cards: React.FC<{mode: SpaceMode}> = ({mode}) => {
 				let rotZ = Math.sin(frame / 120 + card.phase) * 0.08;
 
 				if (mode === 'intro') {
-					// 奥から順に飛んでくる
-					const p = spring({frame: frame - i * 2, fps, config: {damping: 18, mass: 0.9}});
-					z = interpolate(p, [0, 1], [-60, card.z], clamp);
-					rotY += (1 - p) * 2.4;
+					// ドロップまでは真ん中に固まって回り、ドロップで外へはじける
+					const burst = spring({frame: frame - DROP - (i % 5), fps, config: {damping: 14, mass: 0.7}});
+					const spread = interpolate(burst, [0, 1], [0.55, 1.15], clamp);
+					x *= spread;
+					y = card.y * spread + drift;
+					rotY += frame * 0.05 * (1 - burst) + burst * 0.3;
 				}
 				if (mode === 'outro') {
 					// 6 × 3 に並んで、Copipe の画面のように整列する（残りは奥で漂う）

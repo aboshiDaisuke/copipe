@@ -1,9 +1,9 @@
 import React from 'react';
-import {AbsoluteFill, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
+import {AbsoluteFill, Easing, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {fcpCard, historyCards, pinnedCards, tabs} from './data';
 import {Icon, IconName, IconTile} from './icons';
 import {Space} from './three/Space';
-import {clamp, colors, font, palette} from './theme';
+import {BAR, BEAT, clamp, colors, font, palette} from './theme';
 import {Caption, Card, CARD_H, CARD_W, DocWindow, Keys, Panel, SceneFade, usePanelOffset} from './ui';
 
 /** パネルは実物の 1.3 倍で見せる */
@@ -19,57 +19,123 @@ const ScaledPanel: React.FC<{children: React.ReactNode}> = ({children}) => (
 /** パネルの index 番目のカードの、画面上の左上 */
 const cardOrigin = (index: number) => ({x: (20 + index * (CARD_W + 16)) * S, y: PANEL_TOP + (54 + 8) * S});
 
-// どの場面も 2 秒（BGM の 1 小節）の倍数。場面の変わり目が BGM の区切りにそろう
-export const DURATIONS = {intro: 120, open: 300, paste: 300, search: 240, pinboard: 300, transform: 300, fcp: 240, stack: 300, outro: 240};
+// どの場面も BGM の 1 小節（48 フレーム）の倍数。場面の変わり目が BGM の区切りにそろう
+export const DURATIONS = {intro: 192, open: 288, paste: 288, search: 240, pinboard: 288, transform: 288, fcp: 240, stack: 336, outro: 240};
 
 // MARK: - はじまり
+
+/** 1 拍ごとに「ジャン」と出る、コピーできるものの種類 */
+const introKinds: [IconName, string][] = [
+	['doc', '文字'],
+	['image', '画像'],
+	['globe', 'リンク'],
+	['folder', 'ファイル'],
+];
+/** タイトルが出る（BGM のドロップ）フレーム */
+const DROP = BAR * 2;
 
 export const Intro: React.FC = () => {
 	const frame = useCurrentFrame();
 	const {fps} = useVideoConfig();
-	const icon = spring({frame: frame - 12, fps, config: {damping: 12, mass: 0.8}});
-	const title = spring({frame: frame - 35, fps, config: {damping: 14}});
-	const sub = spring({frame: frame - 55, fps, config: {damping: 16}});
-	const out = interpolate(frame, [104, 120], [1, 0], clamp);
-	const glow = 0.35 + Math.sin(frame / 8) * 0.1;
+	const slam = (at: number) => spring({frame: frame - at, fps, config: {damping: 13, stiffness: 320, mass: 0.5}});
+	// 拍ごとの光と揺れ（ドロップのときがいちばん強い）
+	const hit = (at: number, length: number) => interpolate(frame, [at - 1, at, at + length], [0, 1, 0], clamp);
+	const hits = [0, BEAT, BEAT * 2, BEAT * 3].map((at) => hit(at, 7));
+	const flash = Math.max(...hits.map((h) => h * 0.3), hit(DROP, 12) * 0.95);
+	const shake = Math.max(...hits) * 30 + hit(DROP, 18) * 26;
+	// 2 小節目: 言葉が上へ寄って、合いことばが出る。最後の 1 拍で手前へ吸い込まれる
+	const rise = spring({frame: frame - BAR, fps, config: {damping: 16}});
+	const line1 = slam(BAR);
+	const line2 = slam(BAR + BEAT * 2);
+	const warp = interpolate(frame, [BAR + BEAT * 3, DROP], [0, 1], {...clamp, easing: Easing.in(Easing.cubic)});
+	// 3 小節目: タイトル
+	const title = slam(DROP);
+	const sub = spring({frame: frame - DROP - BEAT, fps, config: {damping: 16}});
+	const glow = 0.4 + Math.sin(frame / 6) * 0.1;
+	const out = interpolate(frame, [DURATIONS.intro - 12, DURATIONS.intro], [1, 0], clamp);
 	return (
 		<AbsoluteFill style={{opacity: out}}>
 			<Space mode="intro" />
-			{/* 文字の後ろだけ暗くして読みやすく */}
-			<AbsoluteFill style={{background: `radial-gradient(ellipse 900px 520px at 50% 50%, rgba(8,10,30,${0.75 * title}), transparent)`}} />
-			<AbsoluteFill style={{alignItems: 'center', justifyContent: 'center', fontFamily: font, color: 'white'}}>
-				<div style={{perspective: 900, marginBottom: 6}}>
-					<Img
-						src={staticFile('copipe-icon.png')}
-						style={{
-							width: 210,
-							height: 210,
-							opacity: icon,
-							transform: `rotateY(${(1 - icon) * 160}deg) scale(${0.5 + icon * 0.5})`,
-							filter: `drop-shadow(0 18px 50px rgba(255,150,40,${glow}))`,
-						}}
-					/>
-				</div>
-				<div style={{fontSize: 30, fontWeight: 600, letterSpacing: 6, opacity: sub, marginBottom: 0}}>使い方ガイド</div>
-				<div
-					style={{
-						fontSize: 150,
-						fontWeight: 800,
-						letterSpacing: 4,
-						transform: `scale(${0.7 + title * 0.3})`,
-						opacity: title,
-						background: 'linear-gradient(90deg, #ffffff, #b9c7ff 60%, #ffd6f5)',
-						WebkitBackgroundClip: 'text',
-						color: 'transparent',
-						textShadow: '0 10px 50px rgba(120,140,255,0.35)',
-					}}
-				>
-					Copipe
-				</div>
-				<div style={{fontSize: 46, fontWeight: 600, opacity: sub, transform: `translateY(${(1 - sub) * 20}px)`}}>
-					コピーしたものを、全部覚えておく。
-				</div>
+			<AbsoluteFill
+				style={{
+					fontFamily: font,
+					color: 'white',
+					transform: `translate(${Math.sin(frame * 2.3) * shake}px, ${Math.cos(frame * 3.1) * shake * 0.6}px)`,
+				}}
+			>
+				{frame < DROP ? (
+					<AbsoluteFill style={{alignItems: 'center', justifyContent: 'center', opacity: 1 - warp, transform: `scale(${1 + warp * 2.5})`}}>
+						{/* 文字の後ろだけ暗くして読みやすく */}
+						<AbsoluteFill style={{background: 'radial-gradient(ellipse 1100px 520px at 50% 50%, rgba(8,10,30,0.85), transparent)'}} />
+						<div style={{display: 'flex', gap: 26, transform: `translateY(${rise * -110}px) scale(${1 - rise * 0.25})`}}>
+							{introKinds.map(([icon, label], i) => {
+								const p = slam(i * BEAT);
+								return (
+									<div
+										key={label}
+										style={{
+											display: 'flex',
+											alignItems: 'center',
+											gap: 18,
+											padding: '16px 30px 16px 16px',
+											borderRadius: 30,
+											background: 'rgba(20,24,60,0.8)',
+											border: `4px solid ${palette[[0, 6, 4, 1][i]]}`,
+											fontSize: 64,
+											fontWeight: 800,
+											opacity: Math.min(1, p * 3),
+											transform: `scale(${interpolate(p, [0, 1], [1.9, 1], clamp)}) rotate(${(1 - p) * (i % 2 ? 8 : -8)}deg)`,
+										}}
+									>
+										<IconTile name={icon} size={80} />
+										{label}も
+									</div>
+								);
+							})}
+						</div>
+						<div style={{position: 'absolute', top: 600, display: 'flex', fontSize: 84, fontWeight: 800, letterSpacing: 2, textShadow: '0 6px 30px rgba(0,0,0,0.6)'}}>
+							<span style={{opacity: Math.min(1, line1 * 3), transform: `scale(${interpolate(line1, [0, 1], [1.6, 1], clamp)})`}}>コピーしたものを、</span>
+							<span
+								style={{
+									opacity: Math.min(1, line2 * 3),
+									transform: `scale(${interpolate(line2, [0, 1], [1.6, 1], clamp)})`,
+									background: 'linear-gradient(90deg, #ffd36b, #ff8fb1)',
+									WebkitBackgroundClip: 'text',
+									color: 'transparent',
+								}}
+							>
+								全部覚えておく。
+							</span>
+						</div>
+					</AbsoluteFill>
+				) : (
+					<AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
+						<AbsoluteFill style={{background: 'radial-gradient(ellipse 900px 520px at 50% 50%, rgba(8,10,30,0.75), transparent)'}} />
+						<div style={{display: 'flex', alignItems: 'center', gap: 40, opacity: Math.min(1, title * 3), transform: `scale(${interpolate(title, [0, 1], [1.7, 1], clamp)})`}}>
+							<Img
+								src={staticFile('copipe-icon.png')}
+								style={{width: 200, height: 200, transform: `rotate(${(1 - title) * -25}deg)`, filter: `drop-shadow(0 18px 50px rgba(255,150,40,${glow}))`}}
+							/>
+							<div
+								style={{
+									fontSize: 170,
+									fontWeight: 800,
+									letterSpacing: 4,
+									background: 'linear-gradient(90deg, #ffffff, #b9c7ff 60%, #ffd6f5)',
+									WebkitBackgroundClip: 'text',
+									color: 'transparent',
+								}}
+							>
+								Copipe
+							</div>
+						</div>
+						<div style={{fontSize: 40, fontWeight: 700, letterSpacing: 10, marginTop: 10, opacity: sub, transform: `translateY(${(1 - sub) * 24}px)`}}>
+							使い方ガイド
+						</div>
+					</AbsoluteFill>
+				)}
 			</AbsoluteFill>
+			<AbsoluteFill style={{background: 'white', opacity: flash}} />
 		</AbsoluteFill>
 	);
 };
@@ -82,7 +148,7 @@ export const Open: React.FC = () => {
 		<SceneFade duration={DURATIONS.open}>
 			<DocWindow title="メモ" lines={['会議のメモ', <span style={{color: '#b8b8c0'}}>ここに貼り付けたい…</span>]} />
 			<Caption step={1} icon="tray" title="⌃⌘V で履歴を開く" sub="コピーした文字・画像・リンク・ファイルが、新しい順にカードで並びます。" />
-			<Keys keys={['⌃|control', '⌘|command', 'V']} appearAt={22} pressAt={58} hideAt={140} />
+			<Keys keys={['⌃|control', '⌘|command', 'V']} appearAt={24} pressAt={60} hideAt={144} />
 			<ScaledPanel>
 				<Panel cards={historyCards} selected={0} tabs={tabs} activeTab={0} offsetY={offset} />
 			</ScaledPanel>
@@ -95,7 +161,7 @@ export const Open: React.FC = () => {
 export const PasteScene: React.FC = () => {
 	const frame = useCurrentFrame();
 	const {fps} = useVideoConfig();
-	const selected = frame < 45 ? 0 : frame < 75 ? 1 : frame < 105 ? 2 : 1;
+	const selected = frame < 48 ? 0 : frame < 72 ? 1 : frame < 108 ? 2 : 1;
 	const offset = usePanelOffset(-30, 160);
 	// 選んだカードが書類へ飛んでいく
 	const fly = spring({frame: frame - 152, fps, config: {damping: 20}});
@@ -116,8 +182,8 @@ export const PasteScene: React.FC = () => {
 				]}
 			/>
 			<Caption step={2} icon="cursor" title="選んで return で貼り付け" sub="← → でカードを選んで return。ダブルクリックや ⌘1〜9 でもすぐ貼り付けられます。" />
-			<Keys keys={['→']} appearAt={30} pressAt={[45, 75]} hideAt={90} />
-			<Keys keys={['←']} appearAt={95} pressAt={105} hideAt={125} />
+			<Keys keys={['→']} appearAt={30} pressAt={[48, 72]} hideAt={90} />
+			<Keys keys={['←']} appearAt={95} pressAt={108} hideAt={125} />
 			<Keys keys={['↵|return']} appearAt={128} pressAt={150} hideAt={178} />
 			<ScaledPanel>
 				<Panel cards={historyCards} selected={selected} tabs={tabs} activeTab={0} offsetY={offset} />
@@ -205,7 +271,7 @@ export const PinboardScene: React.FC = () => {
 	return (
 		<SceneFade duration={DURATIONS.pinboard}>
 			<Caption step={4} icon="pin" title="ピンボードに取っておく" sub="よく使うものは、名前と色の付いたピンボードへ。⌃⌘1〜9 ですぐ開けます。" />
-			<Keys keys={['⌃|control', '⌘|command', '1']} appearAt={170} pressAt={195} hideAt={240} />
+			<Keys keys={['⌃|control', '⌘|command', '1']} appearAt={168} pressAt={192} hideAt={240} />
 			<ScaledPanel>
 				<Panel
 					cards={showBoard ? pinnedCards : historyCards}
@@ -402,8 +468,8 @@ export const StackScene: React.FC = () => {
 	const {fps} = useVideoConfig();
 	const values = ['見本株式会社', '山田 太郎', 'yamada@example.com'];
 	const labels = ['会社名', '名前', 'メール'];
-	const copyAt = [80, 120, 160];
-	const pasteAt = [205, 235, 265];
+	const copyAt = [84, 120, 156];
+	const pasteAt = [204, 240, 276];
 	const panelIn = spring({frame: frame - 45, fps, config: {damping: 18}});
 	const copied = copyAt.filter((at) => frame >= at).length;
 	const pastedCount = pasteAt.filter((at) => frame >= at + 6).length;
@@ -412,7 +478,7 @@ export const StackScene: React.FC = () => {
 		<SceneFade duration={DURATIONS.stack}>
 			<Caption step={7} icon="stack" title="ペーストスタック" sub="⌃⌘C で始めて続けてコピー。⌘V を押すたびに、コピーした順に1つずつ貼り付けます。" />
 			<Keys keys={['⌃|control', '⌘|command', 'C']} appearAt={8} pressAt={28} hideAt={60} top={760} />
-			<Keys keys={['⌘|command', 'V']} appearAt={190} pressAt={pasteAt} hideAt={285} top={760} />
+			<Keys keys={['⌘|command', 'V']} appearAt={190} pressAt={pasteAt} hideAt={300} top={760} />
 			{/* コピー元 */}
 			<DocWindow
 				title="名刺のメモ"
@@ -496,7 +562,9 @@ export const StackScene: React.FC = () => {
 export const Outro: React.FC = () => {
 	const frame = useCurrentFrame();
 	const {fps} = useVideoConfig();
-	const title = spring({frame: frame - 40, fps, config: {damping: 15}});
+	const title = spring({frame: frame - BEAT * 3, fps, config: {damping: 15}});
+	// BGM の最後の「ジャーン」（4 小節目の頭）でロゴを光らせる
+	const hit = interpolate(frame, [BAR * 4, BAR * 4 + 3, BAR * 4 + 20], [0, 1, 0], clamp);
 	const chips: [IconName, string][] = [
 		['tray', '⌃⌘V で開く'],
 		['search', '打つだけで探せる'],
@@ -511,14 +579,14 @@ export const Outro: React.FC = () => {
 			<Space mode="outro" />
 			<AbsoluteFill style={{background: `rgba(8,10,30,${title * 0.62})`}} />
 			<AbsoluteFill style={{alignItems: 'center', justifyContent: 'center', fontFamily: font, color: 'white'}}>
-				<div style={{display: 'flex', alignItems: 'center', gap: 36, opacity: title, transform: `scale(${0.8 + title * 0.2})`}}>
-					<Img src={staticFile('copipe-icon.png')} style={{width: 170, height: 170, filter: 'drop-shadow(0 14px 40px rgba(255,150,40,0.4))'}} />
+				<div style={{display: 'flex', alignItems: 'center', gap: 36, opacity: title, transform: `scale(${0.8 + title * 0.2 + hit * 0.05})`}}>
+					<Img src={staticFile('copipe-icon.png')} style={{width: 170, height: 170, filter: `drop-shadow(0 14px ${40 + hit * 40}px rgba(255,150,40,${0.4 + hit * 0.5}))`}} />
 					<div style={{fontSize: 150, fontWeight: 800}}>Copipe</div>
 				</div>
 				<div style={{fontSize: 44, fontWeight: 600, opacity: title, marginTop: 4, textShadow: '0 3px 14px rgba(0,0,0,0.7)'}}>コピーしたものを、全部覚えておく。</div>
 				<div style={{display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 16, marginTop: 50, maxWidth: 1400}}>
 					{chips.map(([icon, chip], i) => {
-						const p = spring({frame: frame - 80 - i * 7, fps, config: {damping: 14}});
+						const p = spring({frame: frame - BEAT * 6 - i * (BEAT / 2), fps, config: {damping: 14}});
 						return (
 							<div
 								key={chip}
@@ -542,7 +610,7 @@ export const Outro: React.FC = () => {
 						);
 					})}
 				</div>
-				<div style={{display: 'flex', alignItems: 'center', gap: 10, fontSize: 26, opacity: interpolate(frame, [140, 160], [0, 0.85], clamp), marginTop: 50}}>
+				<div style={{display: 'flex', alignItems: 'center', gap: 10, fontSize: 26, opacity: interpolate(frame, [BEAT * 12, BEAT * 12 + 16], [0, 0.85], clamp), marginTop: 50}}>
 					<Icon name="shield" size={28} color="#9be7a4" />
 					macOS 14 以降 ・ コピーした中身はこの Mac の中だけに保存
 				</div>
