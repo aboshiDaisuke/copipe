@@ -520,6 +520,15 @@ final class ClipboardStore: ObservableObject {
         savePinboards()
     }
 
+    /// ピンボードの並びを変える（タブの順番。⌃⌘1〜9 の番号もこの順）
+    func movePinboard(_ id: UUID, to index: Int) {
+        guard let from = pinboards.firstIndex(where: { $0.id == id }) else { return }
+        let to = min(max(index, 0), pinboards.count - 1)
+        guard from != to else { return }
+        pinboards.insert(pinboards.remove(at: from), at: to)
+        savePinboards()
+    }
+
     func setColor(of board: Pinboard, to color: Int) {
         guard let idx = pinboards.firstIndex(where: { $0.id == board.id }) else { return }
         pinboards[idx].color = color

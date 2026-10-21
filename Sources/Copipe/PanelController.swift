@@ -36,6 +36,8 @@ final class PanelModel: ObservableObject {
     var dragging: UUID?
     /// 見えているカードの位置（引っぱり始めたカードを探すため）
     var cardFrames: [UUID: CGRect] = [:]
+    /// ピンボードのタブの位置（引っぱって並べ替えるため）
+    var tabFrames: [UUID: CGRect] = [:]
 
     var isFiltered: Bool { filter != .all || app != nil || date != .all }
 
@@ -115,6 +117,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     /// マウスを押した場所とカード（少し動かしたら引っぱり出しを始める）
     private var dragStart: (event: NSEvent, item: UUID)?
+    /// 引っぱっているピンボードのタブ
+    private var draggingTab: UUID?
     /// 「…」ボタンで出すメニュー（Paste と同じ構成）
     var actionMenu: NSMenu?
     /// 前面のアプリに貼り付けたあと（ペーストスタックがクリップボードを戻すため）
@@ -479,6 +483,10 @@ final class PanelController: NSObject, NSWindowDelegate {
             switch event.type {
             case .leftMouseDown:
                 self.dragStart = event.window === self.panel ? self.card(at: event).map { (event, $0) } : nil
+                self.draggingTab = event.window === self.panel ? self.tab(at: event) : nil
+                return event
+            case .leftMouseDragged where self.draggingTab != nil:
+                self.moveTab(to: event)
                 return event
             case .leftMouseDragged:
                 guard let start = self.dragStart else { return event }
@@ -489,6 +497,7 @@ final class PanelController: NSObject, NSWindowDelegate {
                 return nil
             case .leftMouseUp:
                 self.dragStart = nil
+                self.draggingTab = nil
                 return event
             case .flagsChanged:
                 // ⌘ を押している間だけカードに番号を出す
@@ -504,12 +513,39 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // MARK: - 引っぱり出し
 
-    /// マウスの下にあるカード
-    private func card(at event: NSEvent) -> UUID? {
+    /// パネルの左上からの座標
+    private func point(of event: NSEvent) -> CGPoint? {
         guard let view = panel.contentView else { return nil }
         var point = view.convert(event.locationInWindow, from: nil)
         if !view.isFlipped { point.y = view.bounds.height - point.y }
+        return point
+    }
+
+    /// マウスの下にあるカード
+    private func card(at event: NSEvent) -> UUID? {
+        guard let point = point(of: event) else { return nil }
         return model.cardFrames.first { $0.value.contains(point) }?.key
+    }
+
+    /// マウスの下にあるピンボードのタブ
+    private func tab(at event: NSEvent) -> UUID? {
+        guard let point = point(of: event) else { return nil }
+        return model.tabFrames.first { $0.value.contains(point) }?.key
+    }
+
+    /// 引っぱっているタブが隣のタブの真ん中を越えたら、そこへ動かす
+    private func moveTab(to event: NSEvent) {
+        guard let dragged = draggingTab, let point = point(of: event),
+              let from = store.pinboards.firstIndex(where: { $0.id == dragged }) else { return }
+        guard let (target, frame) = model.tabFrames.first(where: { $0.key != dragged && $0.value.minX <= point.x && point.x <= $0.value.maxX }),
+              let to = store.pinboards.firstIndex(where: { $0.id == target }) else { return }
+        // 入れ替わったあとに行ったり来たりしないよう、真ん中を越えてから動かす
+        guard to > from ? point.x > frame.midX : point.x < frame.midX else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            store.movePinboard(dragged, to: to)
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) { store.movePinboard(dragged, to: to) }
+        }
     }
 
     /// カードを他のアプリやピンボードの中に引っぱる。コピーしたときと同じ中身を丸ごと渡す

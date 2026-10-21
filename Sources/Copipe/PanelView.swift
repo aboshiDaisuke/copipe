@@ -70,8 +70,17 @@ struct PanelView: View {
                     tab(board.name, dot: Color(rgb: board.color), active: model.board == board.id) {
                         model.board = board.id
                     }
+                    // 引っぱって並べ替えるために、タブの位置を知らせる（動かすのは PanelController）
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: TabFrames.self, value: [board.id: geo.frame(in: .global)])
+                    })
                     .contextMenu {
                         Button("名前を変更…") { onRenamePinboard(board) }
+                        let index = store.pinboards.firstIndex { $0.id == board.id } ?? 0
+                        Button("左へ移動") { store.movePinboard(board.id, to: index - 1) }
+                            .disabled(index == 0)
+                        Button("右へ移動") { store.movePinboard(board.id, to: index + 1) }
+                            .disabled(index == store.pinboards.count - 1)
                         Menu("色") {
                             ForEach(Pinboard.palette.indices, id: \.self) { i in
                                 checkButton(Pinboard.paletteNames[i], on: board.color == Pinboard.palette[i]) {
@@ -96,6 +105,9 @@ struct PanelView: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 30)
+        .onPreferenceChange(TabFrames.self) { frames in
+            MainActor.assumeIsolated { model.tabFrames = frames }
+        }
     }
 
     private var searchField: some View {
@@ -332,6 +344,15 @@ struct PanelView: View {
 
 /// 見えているカードの位置（パネルの左上からの座標）
 struct CardFrames: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// ピンボードのタブの位置（パネルの左上からの座標）
+struct TabFrames: PreferenceKey {
     static let defaultValue: [UUID: CGRect] = [:]
 
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
