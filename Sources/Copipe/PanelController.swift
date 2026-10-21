@@ -21,6 +21,12 @@ final class PanelModel: ObservableObject {
     /// ⌘・⇧ でまとめて選んだカード（空ならカーソルのカードだけ）
     @Published var marked: Set<UUID> = []
     @Published var previewOpen = false
+    /// プレビューの中で編集しているカード
+    @Published var editing: UUID?
+    @Published var editText = ""
+    @Published var editTitle = ""
+    /// 編集中に回した回数（右回りが正。保存するときに画像に反映する）
+    @Published var editRotation = 0
     @Published var showToken = 0
     @Published var accessibilityGranted = true
     @Published var commandHeld = false
@@ -40,10 +46,10 @@ final class PanelModel: ObservableObject {
     }
 
     func visibleItems(in items: [ClipItem]) -> [ClipItem] {
-        let q = query.trimmingCharacters(in: .whitespaces)
+        let variants = SearchText.variants(of: query)
         return items.filter {
             $0.pinboardID == board && filter.matches($0) && (app == nil || $0.sourceBundleID == app)
-                && date.matches($0.date) && $0.matches(query: q)
+                && date.matches($0.date) && $0.matches(variants)
         }
     }
 
@@ -103,14 +109,14 @@ final class PanelController: NSObject, NSWindowDelegate {
     private let model = PanelModel()
     private var panel: KeyPanel!
     private let preview = FloatingPanel()
+    /// 編集を始めたときのカード（保存するときに使う）
+    private var editingItem: ClipItem?
     private var previewSubscription: AnyCancellable?
     private var keyMonitor: Any?
     /// マウスを押した場所とカード（少し動かしたら引っぱり出しを始める）
     private var dragStart: (event: NSEvent, item: UUID)?
     /// 「…」ボタンで出すメニュー（Paste と同じ構成）
     var actionMenu: NSMenu?
-    /// 「編集…」で編集画面を開く
-    var onEdit: ((ClipItem) -> Void)?
     /// 前面のアプリに貼り付けたあと（ペーストスタックがクリップボードを戻すため）
     var onPasted: (() -> Void)?
 
@@ -139,7 +145,13 @@ final class PanelController: NSObject, NSWindowDelegate {
                              onOpenSettings: { Paster.openAccessibilitySettings() })
         panel.contentView = NSHostingView(rootView: view)
 
-        preview.contentView = FirstMouseHostingView(rootView: PreviewView(store: store, model: model))
+        preview.delegate = self
+        preview.contentView = FirstMouseHostingView(rootView: PreviewView(
+            store: store, model: model,
+            onEdit: { [weak self] in self?.startEdit($0) },
+            onSave: { [weak self] in self?.finishEdit(save: true) },
+            onCancel: { [weak self] in self?.finishEdit(save: false) },
+            onCopyText: { [weak self] in self?.copyText($0) }))
         previewSubscription = model.$previewOpen.removeDuplicates().sink { [weak self] open in
             MainActor.assumeIsolated {
                 if open { self?.showPreview() } else { self?.preview.orderOut(nil) }
@@ -151,12 +163,18 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.isVisible ? hide() : show()
     }
 
+    /// ⌃⌘1〜9: そのピンボードを開く（開いていれば閉じる）
+    func toggle(board: UUID) {
+        panel.isVisible && model.board == board ? hide() : show(board: board)
+    }
+
     func show(board: UUID? = nil) {
         model.query = ""
         model.clearFilters()
         model.board = board
         model.selection = 0
         model.previewOpen = false
+        endEditing()
         model.dragging = nil
         model.accessibilityGranted = Paster.isTrusted
         model.commandHeld = false
@@ -196,9 +214,10 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     /// 動作確認用: ピンボードを開いて、大きいプレビューも PNG に書き出す
-    func snapshotPreview(board index: Int, to path: String) {
+    func snapshotPreview(board index: Int, editing: Bool = false, to path: String) {
         show(board: store.pinboards.indices.contains(index) ? store.pinboards[index].id : nil)
         model.previewOpen = true
+        if editing, let first = model.visibleItems(in: store.items).first { startEdit(first) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             self.snapshot(to: path.replacingOccurrences(of: ".png", with: "-panel.png"))
             guard let view = self.preview.contentView,
@@ -209,6 +228,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        endEditing()
         model.previewOpen = false
         panel.orderOut(nil)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
@@ -219,7 +239,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        hide()
+        // 編集中はプレビューがキーウインドウになるので、パネルを閉じない
+        if notification.object as? NSWindow === panel, model.editing != nil { return }
+        // パネルにもプレビューにも戻っていなければ（他のアプリを押したら）閉じる
+        DispatchQueue.main.async {
+            if !self.panel.isKeyWindow && !self.preview.isKeyWindow { self.hide() }
+        }
     }
 
     private func showActionMenu() {
@@ -258,8 +283,9 @@ final class PanelController: NSObject, NSWindowDelegate {
                 model.select(index)
             }
             model.previewOpen = true
-        case .edit: edit(item)
-        case .rename: rename(item)
+        case .edit, .rename: startEdit(item)
+        case .pasteTransformed(let transform): paste(list, transform: transform)
+        case .copyText: copyText(item)
         case .duplicate: list.forEach(store.duplicate)
         case .open: open(item, with: nil)
         case .openWith(let app): open(item, with: app)
@@ -299,18 +325,87 @@ final class PanelController: NSObject, NSWindowDelegate {
         hide()
     }
 
-    private func edit(_ item: ClipItem) {
-        guard item.text != nil else { return }
+    /// 「整えて貼り付け」: 文字を整えて、書式なしで貼り付ける
+    private func paste(_ list: [ClipItem], transform: TextTransform) {
+        let texts = list.compactMap { $0.text.map { TextTemplate.expandIfNeeded($0) ?? $0 } }
+        guard !texts.isEmpty else { return }
+        store.copyString(transform.apply(texts.joined(separator: "\n")))
         hide()
-        onEdit?(item)
+        guard Preferences.pasteToActiveApp, Paster.isTrusted else {
+            Sound.copied()
+            return
+        }
+        Sound.pasted()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            Paster.sendCommandV()
+            self.onPasted?()
+        }
     }
 
-    private func rename(_ item: ClipItem) {
-        let board = model.board
-        if let name = askName(title: "名前を変更", initial: item.title ?? "", button: "変更", allowEmpty: true) {
-            store.rename(item, to: name.isEmpty ? nil : name)
+    /// option + return: 選んでいるカードの上に「整えて貼り付け」のメニューを出す
+    private func showTransformMenu(for list: [ClipItem]) {
+        guard list.contains(where: { $0.text != nil }), let view = panel.contentView else { return }
+        let menu = NSMenu()
+        for transform in TextTransform.allCases {
+            let entry = NSMenuItem(title: transform.rawValue + "して貼り付け", action: #selector(pasteTransformedFromMenu(_:)),
+                                   keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = transform.rawValue
+            menu.addItem(entry)
         }
-        show(board: board)
+        let frame = list.first.flatMap { model.cardFrames[$0.id] } ?? CGRect(x: 40, y: 80, width: 0, height: 0)
+        var point = CGPoint(x: frame.minX + 14, y: frame.minY + 48)
+        if !view.isFlipped { point.y = view.bounds.height - point.y }
+        menu.popUp(positioning: nil, at: point, in: view)
+    }
+
+    @objc private func pasteTransformedFromMenu(_ sender: NSMenuItem) {
+        guard let transform = (sender.representedObject as? String).flatMap(TextTransform.init(rawValue:)) else { return }
+        paste(model.selectedItems(in: model.visibleItems(in: store.items)), transform: transform)
+    }
+
+    /// 画像から読み取った文字をコピーする
+    private func copyText(_ item: ClipItem) {
+        guard let text = item.ocrText, !text.isEmpty else { return }
+        store.copyString(text)
+        Sound.copied()
+        hide()
+    }
+
+    // MARK: - プレビューの中での編集
+
+    /// 名前と中身（文字のカード）をプレビューの中で書き換える。画像は回せる
+    private func startEdit(_ item: ClipItem) {
+        if let index = model.visibleItems(in: store.items).firstIndex(where: { $0.id == item.id }) {
+            model.select(index)
+        }
+        editingItem = item
+        model.editText = item.text ?? ""
+        model.editTitle = item.title ?? ""
+        model.editRotation = 0
+        model.editing = item.id
+        model.previewOpen = true
+        // 文字を打てるように、プレビューをキーウインドウにする
+        preview.allowsKey = true
+        preview.makeKeyAndOrderFront(nil)
+    }
+
+    private func finishEdit(save: Bool) {
+        guard let item = editingItem else { return }
+        if save {
+            let title = model.editTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if title != (item.title ?? "") { store.rename(item, to: title.isEmpty ? nil : title) }
+            if item.text != nil, model.editText != item.text { store.updateText(of: item, to: model.editText) }
+            if model.editRotation != 0 { store.rotateImage(of: item, quarterTurns: model.editRotation) }
+        }
+        endEditing()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func endEditing() {
+        editingItem = nil
+        model.editing = nil
+        preview.allowsKey = false
     }
 
     private func open(_ item: ClipItem, with app: URL?) {
@@ -353,8 +448,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         show()
     }
 
-    /// 名前を入れてもらう。キャンセルなら nil（allowEmpty なら空の名前も返す）
-    private func askName(title: String, initial: String = "", button: String, allowEmpty: Bool = false) -> String? {
+    /// 名前を入れてもらう。キャンセルか空なら nil
+    private func askName(title: String, initial: String = "", button: String) -> String? {
         hide()
         NSApp.activate()
         let alert = NSAlert()
@@ -368,7 +463,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let name = field.stringValue.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty && !allowEmpty ? nil : name
+        return name.isEmpty ? nil : name
     }
 
     // MARK: - キー操作
@@ -377,7 +472,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard keyMonitor == nil else { return }
         let mask: NSEvent.EventTypeMask = [.keyDown, .flagsChanged, .scrollWheel, .leftMouseDown, .leftMouseDragged, .leftMouseUp]
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            guard let self, self.panel.isKeyWindow else { return event }
+            guard let self else { return event }
+            if event.type == .keyDown, self.model.editing != nil, self.preview.isKeyWindow {
+                return self.handleEditing(event) ? nil : event
+            }
+            guard self.panel.isKeyWindow else { return event }
             switch event.type {
             case .leftMouseDown:
                 self.dragStart = event.window === self.panel ? self.card(at: event).map { (event, $0) } : nil
@@ -484,6 +583,25 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     /// 処理したら true（検索欄には渡さない）
+    /// 編集中のプレビューでのキー（esc で取り消し、⌘S・⌘return で保存）。処理したら true
+    private func handleEditing(_ event: NSEvent) -> Bool {
+        let command = event.modifierFlags.contains(.command)
+        switch Int(event.keyCode) {
+        case 53:
+            finishEdit(save: false)
+            return true
+        case 36 where command, 76 where command:
+            finishEdit(save: true)
+            return true
+        default:
+            if command && event.charactersIgnoringModifiers?.lowercased() == "s" {
+                finishEdit(save: true)
+                return true
+            }
+            return false
+        }
+    }
+
     private func handle(_ event: NSEvent) -> Bool {
         let items = model.visibleItems(in: store.items)
         let selected = model.selectedItems(in: items)
@@ -521,6 +639,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         case 119: // end
             model.select(last)
             return true
+        case 36 where event.modifierFlags.contains(.option), 76 where event.modifierFlags.contains(.option):
+            // option + return: 整えて貼り付け
+            showTransformMenu(for: selected)
+            return true
         case 36, 76: // return / enter（shift 付きなら書式の扱いを逆にする）
             paste(selected, plainText: shift ? !Preferences.alwaysPlainText : nil)
             return true
@@ -554,7 +676,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             copy(selected, plainText: shift ? true : nil)
             return true
         case "e":
-            if let first = selected.first { edit(first) }
+            if let first = selected.first { startEdit(first) }
             return true
         case "d":
             selected.forEach(store.duplicate)

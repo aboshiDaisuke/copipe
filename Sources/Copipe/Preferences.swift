@@ -49,10 +49,37 @@ enum Preferences {
         set { defaults.set(newValue, forKey: "showMenuBarIcon") }
     }
 
+    /// ⌃⌘1〜9 でピンボードを直接開く
+    static var pinboardHotKeys: Bool {
+        get { bool("pinboardHotKeys", default: true) }
+        set { defaults.set(newValue, forKey: "pinboardHotKeys") }
+    }
+
+    /// 自動でピンボードに入れる決まり
+    static var autoRules: [AutoRule] {
+        get { defaults.data(forKey: "autoRules").flatMap { try? JSONDecoder().decode([AutoRule].self, from: $0) } ?? [] }
+        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "autoRules") }
+    }
+
     /// コピーしても保存しないアプリ（bundle ID）
     static var ignoredApps: [String] {
         get { defaults.stringArray(forKey: "ignoredApps") ?? [] }
         set { defaults.set(newValue, forKey: "ignoredApps") }
+    }
+}
+
+/// 「このアプリから」「この種類を」コピーしたら、このピンボードにも入れる
+struct AutoRule: Codable, Identifiable, Equatable {
+    var id = UUID()
+    /// コピー元アプリ（nil ならどのアプリでも）
+    var app: String?
+    /// 種類（ClipFilter の rawValue。nil ならどの種類でも）
+    var kind: String?
+    var board: UUID?
+
+    func matches(_ item: ClipItem) -> Bool {
+        (app == nil || app == item.sourceBundleID)
+            && (kind.flatMap(ClipFilter.init(rawValue:))?.matches(item) ?? true)
     }
 }
 

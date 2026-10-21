@@ -47,6 +47,7 @@ final class ClipboardStore: ObservableObject {
         try? FileManager.default.createDirectory(at: rawDir, withIntermediateDirectories: true)
         load()
         migratePinnedItems()
+        readMaterials()
         trim()
     }
 
@@ -54,7 +55,11 @@ final class ClipboardStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
+        recognizeNextImage()
     }
+
+    /// 保存先のフォルダ（書き出し用）
+    var dataDirectory: URL { baseDir }
 
     // MARK: - 監視
 
@@ -72,8 +77,17 @@ final class ClipboardStore: ObservableObject {
         if let id = front?.bundleIdentifier, Preferences.ignoredApps.contains(id) { return }
         guard let item = makeItem(from: pb, source: (front?.localizedName, front?.bundleIdentifier)) else { return }
         let stored = addToHistory(item)
+        applyAutoRules(to: stored)
         Sound.copied()
         onCapture?(stored)
+        recognizeNextImage()
+    }
+
+    /// 設定の「自動でピンボードに入れる」決まりに合えば、そのピンボードにも入れる
+    private func applyAutoRules(to item: ClipItem) {
+        for rule in Preferences.autoRules where rule.matches(item) {
+            if let board = pinboards.first(where: { $0.id == rule.board }) { add(item, to: board) }
+        }
     }
 
     /// クリップボードの中身から項目を作る（画像・丸ごとのデータはファイルに保存する）
@@ -84,6 +98,7 @@ final class ClipboardStore: ObservableObject {
         var text: String?
         var imageName: String?
         var filePaths: [String]?
+        var material: MaterialInfo?
         var signature: String
 
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
@@ -107,6 +122,7 @@ final class ClipboardStore: ObservableObject {
         } else if let raw {
             // 文字や画像として読めないアプリ独自のデータ（Final Cut Pro・Filmora の素材など）
             kind = .other
+            material = FinalCutMaterial.read(raw) ?? MaterialInfo(names: [], effects: [], duration: nil)
             var all = Data()
             for entry in raw.items.joined() { all.append(entry.data) }
             signature = "r:" + Self.hash(all)
@@ -117,7 +133,7 @@ final class ClipboardStore: ObservableObject {
         return ClipItem(id: UUID(), kind: kind, text: text, imageName: imageName, filePaths: filePaths,
                         rawName: raw.flatMap(saveRaw), rawSize: raw?.totalSize,
                         sourceAppName: source.appName, sourceBundleID: source.bundleID,
-                        date: date, signature: signature, pinboardID: pinboardID, title: title)
+                        date: date, signature: signature, pinboardID: pinboardID, title: title, material: material)
     }
 
     private func captureRaw(_ pb: NSPasteboard) -> RawPasteboard? {
@@ -159,6 +175,7 @@ final class ClipboardStore: ObservableObject {
                 removeRawFile(of: existing)
                 existing.rawName = item.rawName
                 existing.rawSize = item.rawSize
+                existing.material = item.material
             }
             items.insert(existing, at: 0)
             stored = existing
@@ -226,6 +243,14 @@ final class ClipboardStore: ObservableObject {
         if moveToTop && item.pinboardID == nil { self.moveToTop(item) }
     }
 
+    /// 文字だけをクリップボードに入れる（整えて貼り付け・読み取った文字のコピー用。履歴には入れない）
+    func copyString(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        lastChangeCount = pb.changeCount
+    }
+
     /// 複数の項目をまとめてクリップボードに入れる（文字だけなら改行でつなぐ）
     func copyToPasteboard(_ list: [ClipItem], plainText: Bool = false) {
         if list.count == 1 { copyToPasteboard(list[0], plainText: plainText) }
@@ -233,7 +258,8 @@ final class ClipboardStore: ObservableObject {
         let pb = NSPasteboard.general
         pb.clearContents()
         if list.allSatisfy({ $0.text != nil }) {
-            pb.setString(list.compactMap(\.text).joined(separator: "\n"), forType: .string)
+            let texts = list.compactMap { $0.text.map { TextTemplate.expandIfNeeded($0) ?? $0 } }
+            pb.setString(texts.joined(separator: "\n"), forType: .string)
         } else {
             pb.writeObjects(list.flatMap { pasteboardItems(for: $0, plainText: plainText) })
         }
@@ -243,6 +269,11 @@ final class ClipboardStore: ObservableObject {
     /// 項目の中身を書き込み用に作る（丸ごとのデータがあればそのまま、なければ種類ごとに）
     /// 貼り付け・まとめてコピー・引っぱり出しで使う。plainText が true なら文字は書式なしにする
     func pasteboardItems(for item: ClipItem, plainText: Bool = false) -> [NSPasteboardItem] {
+        if let text = item.text, let expanded = TextTemplate.expandIfNeeded(text) {
+            let pbItem = NSPasteboardItem()
+            pbItem.setString(expanded, forType: .string)
+            return [pbItem]
+        }
         if !(plainText && item.text != nil), let raw = loadRaw(of: item) { return pasteboardItems(from: raw) }
         switch item.kind {
         case .text, .link:
@@ -269,6 +300,11 @@ final class ClipboardStore: ObservableObject {
 
     private func write(_ item: ClipItem, to pb: NSPasteboard, plainText: Bool) {
         pb.clearContents()
+        // {今日} などの差し込みがあれば、置き換えた文字だけを入れる
+        if let text = item.text, let expanded = TextTemplate.expandIfNeeded(text) {
+            pb.setString(expanded, forType: .string)
+            return
+        }
         if let raw = loadRaw(of: item), !(plainText && item.text != nil) {
             // コピーしたときのデータを全形式そのまま戻す
             write(raw, to: pb)
@@ -362,7 +398,85 @@ final class ClipboardStore: ObservableObject {
         ClipItem(id: UUID(), kind: item.kind, text: item.text, imageName: item.imageName,
                  filePaths: item.filePaths, rawName: duplicateRawFile(of: item), rawSize: item.rawSize,
                  sourceAppName: item.sourceAppName, sourceBundleID: item.sourceBundleID,
-                 date: Date(), signature: item.signature, pinboardID: pinboardID, title: item.title)
+                 date: Date(), signature: item.signature, pinboardID: pinboardID, title: item.title,
+                 material: item.material, ocrText: item.ocrText)
+    }
+
+    /// 画像を 90° ずつ回す（quarterTurns が正なら右回り）。書き換えたら丸ごとのデータは古くなるので捨てる
+    func rotateImage(of item: ClipItem, quarterTurns: Int) {
+        let turns = ((quarterTurns % 4) + 4) % 4
+        guard turns != 0, let idx = items.firstIndex(where: { $0.id == item.id }),
+              let cgImage = image(for: items[idx])?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return }
+        let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
+        let size = turns % 2 == 0 ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
+        guard let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        context.translateBy(x: size.width / 2, y: size.height / 2)
+        context.rotate(by: -CGFloat(turns) * .pi / 2) // CoreGraphics は左回りが正
+        context.draw(cgImage, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+        guard let rotated = context.makeImage(),
+              let png = NSBitmapImageRep(cgImage: rotated).representation(using: .png, properties: [:]) else { return }
+
+        let old = items[idx]
+        let hash = Self.hash(png)
+        let url = imagesDir.appendingPathComponent(hash + ".png")
+        if !FileManager.default.fileExists(atPath: url.path) { try? png.write(to: url) }
+        removeRawFile(of: old)
+        items[idx].imageName = hash + ".png"
+        items[idx].rawName = nil
+        items[idx].rawSize = nil
+        items[idx].signature = "i:" + hash
+        items[idx].ocrText = nil
+        removeImageFile(of: old)
+        save()
+        recognizeNextImage()
+    }
+
+    // MARK: - 中身の読み取り
+
+    /// Final Cut Pro の素材の中身を、まだ読んでいないものだけ読む
+    private func readMaterials() {
+        var changed = false
+        for idx in items.indices where items[idx].kind == .other && items[idx].material == nil {
+            items[idx].material = loadRaw(of: items[idx]).flatMap(FinalCutMaterial.read)
+                ?? MaterialInfo(names: [], effects: [], duration: nil)
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    private var recognizing = false
+
+    /// まだ文字を読み取っていない画像を、1つずつ順に読む
+    private func recognizeNextImage() {
+        guard !recognizing,
+              let item = items.first(where: { $0.kind == .image && $0.ocrText == nil && $0.imageName != nil }),
+              let url = imageURL(for: item) else { return }
+        recognizing = true
+        Task {
+            let text = await TextRecognizer.recognize(imageAt: url)
+            recognizing = false
+            // 同じ画像（ピンボードに入れたものなど）にはまとめて入れる
+            for idx in items.indices where items[idx].imageName == item.imageName {
+                items[idx].ocrText = text
+            }
+            scheduleSave()
+            recognizeNextImage()
+        }
+    }
+
+    private var saveScheduled = false
+
+    /// 続けて書き換えるときは、少し待ってからまとめて保存する
+    private func scheduleSave() {
+        guard !saveScheduled else { return }
+        saveScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            self.saveScheduled = false
+            self.save()
+        }
     }
 
     /// クリップボードの履歴を消す（ピンボードの項目は残す）
@@ -475,6 +589,39 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    /// バックアップから読み込む。同じ内容が同じ場所にあれば飛ばす。読み込んだ件数を返す
+    func merge(items imported: [ClipItem], pinboards importedBoards: [Pinboard], from dir: URL) -> Int {
+        var boardIDs: [UUID: UUID] = [:]
+        for board in importedBoards { boardIDs[board.id] = pinboard(named: board.name, color: board.color).id }
+        let fm = FileManager.default
+        var count = 0
+        for var item in imported {
+            let boardID = item.pinboardID.flatMap { boardIDs[$0] }
+            if item.pinboardID != nil && boardID == nil { continue }
+            if items.contains(where: { $0.id == item.id || ($0.pinboardID == boardID && $0.signature == item.signature) }) {
+                continue
+            }
+            if let name = item.imageName {
+                let dest = imagesDir.appendingPathComponent(name)
+                if !fm.fileExists(atPath: dest.path) {
+                    try? fm.copyItem(at: dir.appendingPathComponent("images").appendingPathComponent(name), to: dest)
+                }
+            }
+            if let name = item.rawName {
+                let newName = UUID().uuidString + ".plist"
+                let copied = (try? fm.copyItem(at: dir.appendingPathComponent("raw").appendingPathComponent(name),
+                                               to: rawDir.appendingPathComponent(newName))) != nil
+                item.rawName = copied ? newName : nil
+            }
+            item.pinboardID = boardID
+            items.append(item)
+            count += 1
+        }
+        finishImport()
+        recognizeNextImage()
+        return count
+    }
+
     /// 同じ名前のピンボードがあれば色を合わせて返し、なければ作る
     func pinboard(named name: String, color: Int) -> Pinboard {
         guard let idx = pinboards.firstIndex(where: { $0.name == name }) else {
@@ -544,6 +691,12 @@ final class ClipboardStore: ObservableObject {
     }
 
     // MARK: - 保存
+
+    /// 今すぐ保存する（書き出しの前など）
+    func saveNow() {
+        save()
+        savePinboards()
+    }
 
     private func load() {
         if let data = try? Data(contentsOf: historyURL),

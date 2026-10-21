@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private var stack: PasteStack!
     private var hotKey: HotKey?
     private var stackHotKey: HotKey?
+    private var pinboardHotKeys: [HotKey] = []
     private var launchedAtLogin = false
     private var statusItem: NSStatusItem!
 
@@ -25,11 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         stack = PasteStack(store: store)
         store.onCapture = { [weak self] in self?.stack.collect($0) }
         panel.onPasted = { [weak self] in self?.stack.restoreAfterPaste() }
-        panel.onEdit = { [weak self] in self?.edit($0) }
         panel.actionMenu = makeMenu(includeShow: false)
         setupStatusItem()
         registerHotKey(Shortcut.current)
         registerStackHotKey(StackShortcut.current)
+        registerPinboardHotKeys(Preferences.pinboardHotKeys)
 
         if !Paster.isTrusted { Paster.requestAccess() }
         // ログイン時の自動起動でなければ、起動したことが分かるように履歴を出す
@@ -43,9 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             let summary = PasteImporter.summary(of: Result { try PasteImporter.run(into: store) })
             try? summary.write(toFile: CommandLine.arguments[i + 1], atomically: true, encoding: .utf8)
         }
-        if let i = CommandLine.arguments.firstIndex(of: "--snapshot-preview"), i + 2 < CommandLine.arguments.count {
+        for flag in ["--snapshot-preview", "--snapshot-edit"] {
+            guard let i = CommandLine.arguments.firstIndex(of: flag), i + 2 < CommandLine.arguments.count else { continue }
             let board = Int(CommandLine.arguments[i + 1]) ?? -1, path = CommandLine.arguments[i + 2]
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.panel.snapshotPreview(board: board, to: path) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (flag == "--snapshot-edit" ? 6 : 1)) {
+                self.panel.snapshotPreview(board: board, editing: flag == "--snapshot-edit", to: path)
+            }
         }
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot-settings"), i + 1 < CommandLine.arguments.count {
             let path = CommandLine.arguments[i + 1]
@@ -105,6 +109,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         stackHotKey = key
         if !key.isRegistered { warnShortcutTaken(shortcut.title) }
+    }
+
+    /// ⌃⌘1〜9: 左から数えて何番目かのピンボードを開く（他のアプリが使っているキーは黙って飛ばす）
+    private func registerPinboardHotKeys(_ enabled: Bool) {
+        pinboardHotKeys = []
+        guard enabled else { return }
+        let keyCodes = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
+                        kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
+        for (index, keyCode) in keyCodes.enumerated() {
+            let key = HotKey(keyCode: keyCode, modifiers: controlKey | cmdKey, id: UInt32(11 + index)) { [weak self] in
+                guard let self, self.store.pinboards.indices.contains(index) else { return }
+                self.panel.toggle(board: self.store.pinboards[index].id)
+            }
+            if key.isRegistered { pinboardHotKeys.append(key) }
+        }
     }
 
     private func warnShortcutTaken(_ title: String) {
@@ -229,19 +248,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
-    /// 「編集…」: 文字を書き換える画面
-    private func edit(_ item: ClipItem) {
-        let id = "edit-\(item.id)"
-        windows.present(id: id, title: "テキストを編集", size: CGSize(width: 480, height: 320)) {
-            NewTextView(model: NewTextModel(text: item.text ?? ""), saveTitle: "保存", onSave: { [weak self] text in
-                self?.store.updateText(of: item, to: text)
-                self?.windows.close(id: id)
-            }, onCancel: { [weak self] in
-                self?.windows.close(id: id)
-            })
-        }
-    }
-
     @objc private func toggleStack() {
         panel.hide()
         stack.toggle()
@@ -253,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             SettingsView(store: store, model: SettingsModel(),
                          onShortcutChange: { [weak self] in self?.registerHotKey($0) },
                          onStackShortcutChange: { [weak self] in self?.registerStackHotKey($0) },
+                         onPinboardHotKeysChange: { [weak self] in self?.registerPinboardHotKeys($0) },
                          onMenuBarIconChange: { [weak self] in self?.statusItem.isVisible = $0 })
         }
     }

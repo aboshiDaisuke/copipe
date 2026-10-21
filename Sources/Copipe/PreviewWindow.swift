@@ -4,7 +4,9 @@ import SwiftUI
 
 /// クリックしてもキーウインドウにならないパネル（履歴パネルのキー操作や、貼り付け先のアプリの入力を邪魔しない）
 final class FloatingPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    /// プレビューの中で編集するときだけ true（文字を打てるようにする）
+    var allowsKey = false
+    override var canBecomeKey: Bool { allowsKey }
     override var canBecomeMain: Bool { false }
 
     convenience init() {
@@ -23,11 +25,18 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// space で出す大きいプレビュー（選んでいるカードの中身）
+/// space で出す大きいプレビュー（選んでいるカードの中身）。「編集」でその場で書き換えられる
 struct PreviewView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var model: PanelModel
     @ObservedObject var links = LinkPreviews.shared
+    var onEdit: (ClipItem) -> Void
+    var onSave: () -> Void
+    var onCancel: () -> Void
+    var onCopyText: (ClipItem) -> Void
+
+    private enum Field { case title, body }
+    @FocusState private var focus: Field?
 
     var body: some View {
         let items = model.visibleItems(in: store.items)
@@ -43,25 +52,71 @@ struct PreviewView: View {
             VisualEffectBackground()
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         )
+        .onChange(of: model.editing) {
+            guard model.editing != nil else { return }
+            // プレビューがキーウインドウになってから、文字を打つ場所を選ぶ
+            let item = items.indices.contains(model.selection) ? items[model.selection] : nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focus = item?.text != nil ? .body : .title }
+        }
     }
 
     private func content(_ item: ClipItem) -> some View {
-        VStack(spacing: 0) {
+        let editing = model.editing == item.id
+        return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if let icon = AppAppearance.icon(for: item.sourceBundleID) {
                     Image(nsImage: icon).resizable().frame(width: 22, height: 22)
                 }
-                Text(item.displayTitle).font(.system(size: 15, weight: .semibold))
+                if editing {
+                    TextField("名前（\(item.displayTitle)）", text: $model.editTitle)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 14))
+                        .frame(maxWidth: 280)
+                        .focused($focus, equals: .title)
+                } else {
+                    Text(item.displayTitle).font(.system(size: 15, weight: .semibold))
+                }
                 Spacer()
-                Text(ClipCard.detail(of: item, store: store))
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                if editing {
+                    if item.kind == .image {
+                        Button { model.editRotation -= 1 } label: { Image(systemName: "rotate.left") }
+                            .help("左に回転")
+                        Button { model.editRotation += 1 } label: { Image(systemName: "rotate.right") }
+                            .help("右に回転")
+                    }
+                    Button("キャンセル", action: onCancel)
+                    Button("保存", action: onSave)
+                        .buttonStyle(.borderedProminent)
+                        .help("⌘S・⌘return でも保存できます")
+                } else {
+                    Text(ClipCard.detail(of: item, store: store))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    if let text = item.ocrText, !text.isEmpty {
+                        Button("文字をコピー") { onCopyText(item) }
+                            .help("画像から読み取った文字をコピーします")
+                    }
+                    Button("編集") { onEdit(item) }
+                        .help("⌘E")
+                }
             }
+            .controlSize(.small)
             .padding(.horizontal, 16)
             .frame(height: 44)
             Divider()
-            preview(item)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if editing && item.text != nil {
+                    TextEditor(text: $model.editText)
+                        .font(.system(size: 15))
+                        .scrollContentBackground(.hidden)
+                        .focused($focus, equals: .body)
+                        .padding(12)
+                } else {
+                    preview(item)
+                        .rotationEffect(.degrees(editing ? Double(model.editRotation) * 90 : 0))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -101,18 +156,52 @@ struct PreviewView: View {
                         .padding(8)
                 }
             case .other:
-                VStack(spacing: 8) {
-                    Image(systemName: "eye.slash")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.secondary)
-                    Text("プレビュー利用不可")
-                        .font(.system(size: 15, weight: .semibold))
-                    Text("プレビューは表示できませんが、中身は保存してあり、そのまま貼り付けられます。")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                if let material = item.material, !material.isEmpty {
+                    materialPreview(material)
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "eye.slash")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.secondary)
+                        Text("プレビュー利用不可")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text("プレビューは表示できませんが、中身は保存してあり、そのまま貼り付けられます。")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
                 }
-                .padding(24)
             }
+        }
+    }
+
+    /// Final Cut Pro の素材の中身（クリップ名・テロップ・エフェクト・長さ）
+    private func materialPreview(_ material: MaterialInfo) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let duration = material.durationText {
+                    Label("長さ \(duration)", systemImage: "clock")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                if !material.names.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("クリップ・テロップ").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                        ForEach(Array(material.names.enumerated()), id: \.offset) { _, name in
+                            Label(name, systemImage: "film").font(.system(size: 15)).textSelection(.enabled)
+                        }
+                    }
+                }
+                if !material.effects.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("エフェクト・タイトル").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                        ForEach(Array(material.effects.enumerated()), id: \.offset) { _, name in
+                            Label(name, systemImage: "sparkles").font(.system(size: 15))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
         }
     }
 

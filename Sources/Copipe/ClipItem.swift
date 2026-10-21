@@ -34,11 +34,21 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var pinboardID: UUID?
     /// 自分で付けた名前（Paste から引き継いだもの）
     var title: String?
+    /// Final Cut Pro の素材の中身（クリップ名・エフェクト名・長さ）
+    var material: MaterialInfo?
+    /// 画像から読み取った文字（"" なら読み取り済みで文字なし、nil ならまだ）
+    var ocrText: String?
 
-    func matches(query: String) -> Bool {
-        if query.isEmpty { return true }
-        let haystacks = [text, sourceAppName, title] + (filePaths ?? []).map { ($0 as NSString).lastPathComponent }
-        return haystacks.contains { $0?.localizedCaseInsensitiveContains(query) == true }
+    /// 検索（variants は SearchText.variants で作った、ひらがな・カタカナの言い換え）
+    func matches(_ variants: [String]) -> Bool {
+        if variants.isEmpty { return true }
+        var haystacks = [text, sourceAppName, title, ocrText]
+        haystacks += (filePaths ?? []).map { ($0 as NSString).lastPathComponent }
+        haystacks += (material?.names ?? []) + (material?.effects ?? [])
+        return haystacks.contains { haystack in
+            guard let haystack, !haystack.isEmpty else { return false }
+            return variants.contains { SearchText.contains(haystack, $0) }
+        }
     }
 
     /// カードの上に出す名前
@@ -107,6 +117,24 @@ enum ClipFilter: String, CaseIterable, Identifiable {
         case .file: item.kind == .file
         case .other: item.kind == .other
         }
+    }
+}
+
+/// Final Cut Pro の素材の中身
+struct MaterialInfo: Codable, Equatable {
+    /// クリップ名・テロップの文字
+    var names: [String]
+    /// 使っているエフェクト・タイトル・トランジション
+    var effects: [String]
+    /// 長さ（秒）
+    var duration: Double?
+
+    var isEmpty: Bool { names.isEmpty && effects.isEmpty }
+
+    var durationText: String? {
+        guard let duration else { return nil }
+        if duration < 60 { return String(format: "%.1f 秒", duration) }
+        return "\(Int(duration) / 60) 分 \(Int(duration) % 60) 秒"
     }
 }
 

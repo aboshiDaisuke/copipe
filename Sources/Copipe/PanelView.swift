@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 /// カードの右クリックメニューの項目
 enum CardAction {
-    case paste, pastePlain, copy, copyPlain
+    case paste, pastePlain, pasteTransformed(TextTransform), copy, copyPlain, copyText
     case preview, edit, rename, duplicate
     case open, openWith(URL), reveal
     case addTo(Pinboard), newPinboard
@@ -268,16 +268,22 @@ struct PanelView: View {
         Button("貼り付け" + suffix) { onAction(.paste, item) }
         if item.text != nil {
             Button("書式なしで貼り付け" + suffix) { onAction(.pastePlain, item) }
+            Menu("整えて貼り付け" + suffix) {
+                ForEach(TextTransform.allCases) { transform in
+                    Button(transform.rawValue) { onAction(.pasteTransformed(transform), item) }
+                }
+            }
         }
         Button("コピー" + suffix) { onAction(.copy, item) }
         if item.text != nil {
             Button("書式なしでコピー" + suffix) { onAction(.copyPlain, item) }
         }
+        if let text = item.ocrText, !text.isEmpty {
+            Button("画像の文字をコピー") { onAction(.copyText, item) }
+        }
         Divider()
         Button("プレビュー") { onAction(.preview, item) }
-        if item.text != nil {
-            Button("編集…") { onAction(.edit, item) }
-        }
+        Button("編集…") { onAction(.edit, item) }
         Button("名前を変更…") { onAction(.rename, item) }
         Button("複製" + suffix) { onAction(.duplicate, item) }
         if let url = item.openURL {
@@ -548,28 +554,66 @@ struct ClipCard: View {
                                  })
                 }
             case .other:
-                VStack(spacing: 0) {
-                    header(onMedia: false)
-                    Spacer(minLength: 0)
-                    if let icon = AppAppearance.icon(for: item.sourceBundleID) {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .frame(width: 84, height: 84)
-                    } else {
-                        Image(systemName: "shippingbox")
-                            .font(.system(size: 52, weight: .light))
-                            .foregroundStyle(.secondary)
+                if let material = item.material, !material.isEmpty {
+                    materialCard(material)
+                } else {
+                    VStack(spacing: 0) {
+                        header(onMedia: false)
+                        Spacer(minLength: 0)
+                        otherIcon
+                        Text("\(item.sourceAppName ?? "アプリ") の素材")
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 10)
+                        Spacer(minLength: 0)
+                        footer(detail)
                     }
-                    Text("\(item.sourceAppName ?? "アプリ") の素材")
-                        .font(.system(size: 14, weight: .medium))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 14)
-                        .padding(.top, 10)
-                    Spacer(minLength: 0)
-                    footer(detail)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var otherIcon: some View {
+        if let icon = AppAppearance.icon(for: item.sourceBundleID) {
+            Image(nsImage: icon)
+                .resizable()
+                .frame(width: 84, height: 84)
+        } else {
+            Image(systemName: "shippingbox")
+                .font(.system(size: 52, weight: .light))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Final Cut Pro の素材：中のクリップ名・テロップと、使っているエフェクト
+    private func materialCard(_ material: MaterialInfo) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header(onMedia: false)
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(material.names.prefix(4).enumerated()), id: \.offset) { _, name in
+                    Label(name, systemImage: "film")
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                }
+                if material.names.count > 4 {
+                    Text("ほか \(material.names.count - 4) 個")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                if !material.effects.isEmpty {
+                    Label(material.effects.joined(separator: "・"), systemImage: "sparkles")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            footer([material.durationText, ClipCard.detail(of: item, store: store)].compactMap { $0 }.joined(separator: " ・ "))
         }
     }
 
