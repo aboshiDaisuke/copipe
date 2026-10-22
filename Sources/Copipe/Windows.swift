@@ -51,9 +51,6 @@ final class SettingsModel: ObservableObject {
     }
     @Published var ignoreTransient = Preferences.ignoreTransient { didSet { Preferences.ignoreTransient = ignoreTransient } }
     @Published var linkPreviews = Preferences.linkPreviews { didSet { Preferences.linkPreviews = linkPreviews } }
-    @Published var showWhileScreenSharing = Preferences.showWhileScreenSharing {
-        didSet { Preferences.showWhileScreenSharing = showWhileScreenSharing }
-    }
     @Published var ignoredApps = Preferences.ignoredApps { didSet { Preferences.ignoredApps = ignoredApps } }
     @Published var pinboardHotKeys = Preferences.pinboardHotKeys { didSet { Preferences.pinboardHotKeys = pinboardHotKeys } }
     @Published var autoRules = Preferences.autoRules { didSet { Preferences.autoRules = autoRules } }
@@ -160,10 +157,6 @@ struct SettingsView: View {
                 Toggle(isOn: $model.linkPreviews) {
                     Text("リンクプレビューを生成する")
                     Text("リンク先のページの題名と画像を取ってきます。1回しか使えないリンクなどに影響することがあります。")
-                }
-                Toggle(isOn: $model.showWhileScreenSharing) {
-                    Text("画面共有中に表示")
-                    Text("オフのときは、画面共有・画面収録・スクリーンショットに Copipe の画面を写しません。使い方の動画を撮るときはオンにしてください。")
                 }
             }
 

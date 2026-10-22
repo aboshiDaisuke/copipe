@@ -218,7 +218,6 @@ final class PanelController: NSObject, NSWindowDelegate {
         let target = NSRect(x: visible.minX, y: visible.minY, width: visible.width, height: panelHeight)
 
         installKeyMonitor()
-        panel.applyScreenSharingPreference()
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             panel.setFrame(target, display: true)
             panel.alphaValue = 1
@@ -294,7 +293,6 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard height > 120 else { return }
         preview.setFrame(NSRect(x: visible.midX - width / 2, y: panel.frame.maxY + 16, width: width, height: height),
                          display: true)
-        preview.applyScreenSharingPreference()
         preview.orderFrontRegardless()
     }
 

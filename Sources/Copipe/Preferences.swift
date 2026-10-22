@@ -49,12 +49,6 @@ enum Preferences {
         set { defaults.set(newValue, forKey: "showMenuBarIcon") }
     }
 
-    /// 画面共有・画面収録のときも Copipe の画面を写す（オフなら相手に見せない）
-    static var showWhileScreenSharing: Bool {
-        get { bool("showWhileScreenSharing", default: false) }
-        set { defaults.set(newValue, forKey: "showWhileScreenSharing") }
-    }
-
     /// ⌃⌘1〜9 でピンボードを直接開く
     static var pinboardHotKeys: Bool {
         get { bool("pinboardHotKeys", default: true) }
@@ -86,13 +80,6 @@ struct AutoRule: Codable, Identifiable, Equatable {
     func matches(_ item: ClipItem) -> Bool {
         (app == nil || app == item.sourceBundleID)
             && (kind.flatMap(ClipFilter.init(rawValue:))?.matches(item) ?? true)
-    }
-}
-
-extension NSWindow {
-    /// 設定の「画面共有中に表示」に合わせて、画面共有・画面収録・スクリーンショットに写すかを決める
-    func applyScreenSharingPreference() {
-        sharingType = Preferences.showWhileScreenSharing ? .readOnly : .none
     }
 }
 
