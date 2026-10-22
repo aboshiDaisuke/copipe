@@ -24,6 +24,17 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>jp.daisukeaboshi.copipe</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>copipe</string>
+            </array>
+        </dict>
+    </array>
     <key>UTExportedTypeDeclarations</key>
     <array>
         <dict>

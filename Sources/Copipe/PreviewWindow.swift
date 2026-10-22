@@ -34,9 +34,9 @@ struct PreviewView: View {
     var onSave: () -> Void
     var onCancel: () -> Void
     var onCopyText: (ClipItem) -> Void
+    var onRemoveBackground: (ClipItem) -> Void
 
-    private enum Field { case title, body }
-    @FocusState private var focus: Field?
+    @FocusState private var titleFocused: Bool
 
     var body: some View {
         let items = model.visibleItems(in: store.items)
@@ -54,9 +54,10 @@ struct PreviewView: View {
         )
         .onChange(of: model.editing) {
             guard model.editing != nil else { return }
-            // プレビューがキーウインドウになってから、文字を打つ場所を選ぶ
+            // プレビューがキーウインドウになってから、文字を打つ場所を選ぶ（文字のカードは本文の欄が自分で選ぶ）
             let item = items.indices.contains(model.selection) ? items[model.selection] : nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focus = item?.text != nil ? .body : .title }
+            guard item?.text == nil else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { titleFocused = true }
         }
     }
 
@@ -72,13 +73,38 @@ struct PreviewView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 14))
                         .frame(maxWidth: 280)
-                        .focused($focus, equals: .title)
+                        .focused($titleFocused)
                 } else {
                     Text(item.displayTitle).font(.system(size: 15, weight: .semibold))
                 }
                 Spacer()
                 if editing {
+                    if let notice = model.editNotice {
+                        Text(notice).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if item.text != nil {
+                        ForEach(TextStyle.allCases, id: \.self) { style in
+                            Button { model.toggle(style) } label: { Image(systemName: style.symbol) }
+                                .help(style.key.map { "\(style.title)（⌘\($0.uppercased())）" } ?? style.title)
+                        }
+                        if RichText.writingToolsAvailable {
+                            Button { model.showWritingTools() } label: { Label("執筆ツール", systemImage: "apple.intelligence") }
+                                .help("Apple Intelligence で書き直し・校正・要約をします")
+                        }
+                    }
                     if item.kind == .image {
+                        if model.removingBackground {
+                            ProgressView().controlSize(.small)
+                        } else if model.editCutout == nil {
+                            Button { onRemoveBackground(item) } label: {
+                                Label("背景を削除", systemImage: "person.and.background.dotted")
+                            }
+                            .help("写っている人・動物・物だけを残して、背景を透明にします")
+                        } else {
+                            Button { model.editCutout = nil } label: {
+                                Label("背景を復元", systemImage: "arrow.uturn.backward")
+                            }
+                        }
                         Button { model.editRotation -= 1 } label: { Image(systemName: "rotate.left") }
                             .help("左に回転")
                         Button { model.editRotation += 1 } label: { Image(systemName: "rotate.right") }
@@ -106,11 +132,16 @@ struct PreviewView: View {
             Divider()
             Group {
                 if editing && item.text != nil {
-                    TextEditor(text: $model.editText)
-                        .font(.system(size: 15))
-                        .scrollContentBackground(.hidden)
-                        .focused($focus, equals: .body)
-                        .padding(12)
+                    RichTextView(text: model.editInitialText, editable: true,
+                                 onCreate: { model.editTextView = $0 },
+                                 onChange: { model.editTextChanged = true })
+                        .padding(4)
+                } else if editing, let cutout = model.editCutout {
+                    Image(decorative: cutout, scale: 1)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(16)
+                        .rotationEffect(.degrees(Double(model.editRotation) * 90))
                 } else {
                     preview(item)
                         .rotationEffect(.degrees(editing ? Double(model.editRotation) * 90 : 0))
@@ -133,13 +164,19 @@ struct PreviewView: View {
         } else {
             switch item.kind {
             case .text:
-                ScrollView {
-                    Text(Self.limited(item.text ?? ""))
-                        .font(.system(size: 15))
-                        .lineSpacing(3)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
+                // 書式付きでコピーしたものは、書式（太字・色・大きさ）もそのまま見せる
+                if let rich = store.attributedText(for: item) {
+                    RichTextView(text: rich)
+                        .padding(4)
+                } else {
+                    ScrollView {
+                        Text(Self.limited(item.text ?? ""))
+                            .font(.system(size: 15))
+                            .lineSpacing(3)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
                 }
             case .link:
                 linkPreview(item.text ?? "")

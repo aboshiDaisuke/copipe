@@ -30,5 +30,9 @@ echo "ビルド完了: $APP"
 if [[ "${1:-}" == "install" ]]; then
     rm -rf /Applications/Copipe.app
     cp -R "$APP" /Applications/
+    # copipe:// のリンクが /Applications のほうで開くように、ビルド用のコピーは登録から外す
+    LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    "$LSREGISTER" -u "$PWD/$APP" 2>/dev/null || true
+    "$LSREGISTER" -f /Applications/Copipe.app
     echo "インストール完了: /Applications/Copipe.app"
 fi

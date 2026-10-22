@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private var stackHotKey: HotKey?
     private var pinboardHotKeys: [HotKey] = []
     private var launchedAtLogin = false
+    private var launchedByURL = false
     private var statusItem: NSStatusItem!
 
     private enum Tag {
@@ -34,8 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         registerPinboardHotKeys(Preferences.pinboardHotKeys)
 
         if !Paster.isTrusted { Paster.requestAccess() }
-        // ログイン時の自動起動でなければ、起動したことが分かるように履歴を出す
-        if !launchedAtLogin {
+        // ログイン時の自動起動や copipe:// のリンクで開いたのでなければ、起動したことが分かるように履歴を出す
+        if !launchedAtLogin && !launchedByURL {
             showAfterActivation()
         }
         if let i = CommandLine.arguments.firstIndex(of: "--copy-paste-db"), i + 1 < CommandLine.arguments.count {
@@ -77,15 +78,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     /// Finder などから開かれたとき。アプリが前面に来るのを待ってから出さないと、すぐ閉じてしまう
-    private func showAfterActivation() {
+    private func showAfterActivation(board: UUID? = nil) {
         NSApp.activate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.panel.show() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.panel.show(board: board) }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         let event = NSAppleEventManager.shared().currentAppleEvent
         launchedAtLogin = event?.eventID == kAEOpenApplication
             && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        launchedByURL = event?.eventID == AEEventID(kAEGetURL)
+    }
+
+    // MARK: - copipe:// のリンク
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.compactMap(URLCommand.init).forEach(run)
+    }
+
+    private func run(_ command: URLCommand) {
+        switch command.action {
+        case .open:
+            showAfterActivation(board: command.pinboard.flatMap { name in store.pinboards.first { $0.name == name }?.id })
+            return
+        case .add:
+            guard let text = command.text else { break }
+            let board = command.pinboard.map { name in
+                store.pinboards.first { $0.name == name } ?? store.createPinboard(name: name)
+            }
+            store.addManualText(text, to: board)
+            Sound.copied()
+        case .pause:
+            store.pause(for: command.minutes.map { $0 * 60 })
+        case .resume:
+            store.resume()
+        case .stack:
+            stack.toggle()
+        }
+        // ショートカット App などから開かれて前面に来ていたら、元のアプリに前面を返す
+        let windowOpen = NSApp.windows.contains { $0.isVisible && $0.canBecomeMain }
+        if NSApp.isActive && !windowOpen { NSApp.hide(nil) }
     }
 
     // MARK: - ショートカット

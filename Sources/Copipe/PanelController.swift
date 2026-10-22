@@ -23,10 +23,22 @@ final class PanelModel: ObservableObject {
     @Published var previewOpen = false
     /// プレビューの中で編集しているカード
     @Published var editing: UUID?
-    @Published var editText = ""
+    /// 編集を始めたときの文字（書式付き。書式のない文字は黒い字にしたもの）
+    @Published var editInitialText = NSAttributedString()
+    /// 編集中の文字欄（保存のときに中身を読む）
+    weak var editTextView: NSTextView?
+    /// 文字か書式を書き換えたか
+    var editTextChanged = false
+    /// 元の文字に書式があったか（あれば書式付きのまま保存する）
+    var editWasRich = false
     @Published var editTitle = ""
     /// 編集中に回した回数（右回りが正。保存するときに画像に反映する）
     @Published var editRotation = 0
+    /// 背景を消した画像（「背景を復元」で nil に戻す。保存するときに置き換える）
+    @Published var editCutout: CGImage?
+    @Published var removingBackground = false
+    /// 編集中に出すお知らせ（背景を消せなかったときなど）
+    @Published var editNotice: String?
     @Published var showToken = 0
     @Published var accessibilityGranted = true
     @Published var commandHeld = false
@@ -55,6 +67,18 @@ final class PanelModel: ObservableObject {
             $0.pinboardID == board && filter.matches($0) && (app == nil || $0.sourceBundleID == app)
                 && date.matches($0.date) && $0.matches(variants)
         }
+    }
+
+    /// 編集中の文字の、選んでいるところの書式を付け外しする
+    func toggle(_ style: TextStyle) {
+        if let editTextView { RichText.toggle(style, in: editTextView) }
+    }
+
+    /// Apple Intelligence の執筆ツール（書き直し・校正・要約など）を出す
+    func showWritingTools() {
+        guard #available(macOS 15.2, *), let editTextView else { return }
+        editTextView.window?.makeFirstResponder(editTextView)
+        editTextView.showWritingTools(nil)
     }
 
     func selectedItems(in items: [ClipItem]) -> [ClipItem] {
@@ -157,7 +181,8 @@ final class PanelController: NSObject, NSWindowDelegate {
             onEdit: { [weak self] in self?.startEdit($0) },
             onSave: { [weak self] in self?.finishEdit(save: true) },
             onCancel: { [weak self] in self?.finishEdit(save: false) },
-            onCopyText: { [weak self] in self?.copyText($0) }))
+            onCopyText: { [weak self] in self?.copyText($0) },
+            onRemoveBackground: { [weak self] in self?.removeBackground(of: $0) }))
         previewSubscription = model.$previewOpen.removeDuplicates().sink { [weak self] open in
             MainActor.assumeIsolated {
                 if open { self?.showPreview() } else { self?.preview.orderOut(nil) }
@@ -193,6 +218,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         let target = NSRect(x: visible.minX, y: visible.minY, width: visible.width, height: panelHeight)
 
         installKeyMonitor()
+        panel.applyScreenSharingPreference()
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             panel.setFrame(target, display: true)
             panel.alphaValue = 1
@@ -247,8 +273,11 @@ final class PanelController: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         // パネルにもプレビューにも戻っていなければ（他のアプリを押したら）閉じる
         // 編集を始めてプレビューがキーになったときは、ここでプレビューがキーなので閉じない
+        // 編集中に Copipe の別の小窓（執筆ツールなど）がキーになったときも閉じない
         DispatchQueue.main.async {
-            if !self.panel.isKeyWindow && !self.preview.isKeyWindow { self.hide() }
+            guard !self.panel.isKeyWindow && !self.preview.isKeyWindow else { return }
+            if self.model.editing != nil && NSApp.keyWindow != nil { return }
+            self.hide()
         }
     }
 
@@ -265,6 +294,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard height > 120 else { return }
         preview.setFrame(NSRect(x: visible.midX - width / 2, y: panel.frame.maxY + 16, width: width, height: height),
                          display: true)
+        preview.applyScreenSharingPreference()
         preview.orderFrontRegardless()
     }
 
@@ -381,15 +411,21 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // MARK: - プレビューの中での編集
 
-    /// 名前と中身（文字のカード）をプレビューの中で書き換える。画像は回せる
+    /// 名前と中身（文字のカード）をプレビューの中で書き換える。文字は書式も変えられ、画像は回したり背景を消したりできる
     private func startEdit(_ item: ClipItem) {
         if let index = model.visibleItems(in: store.items).firstIndex(where: { $0.id == item.id }) {
             model.select(index)
         }
         editingItem = item
-        model.editText = item.text ?? ""
+        let rich = store.attributedText(for: item)
+        model.editWasRich = rich != nil
+        model.editInitialText = rich ?? RichText.plain(item.text ?? "")
+        model.editTextChanged = false
         model.editTitle = item.title ?? ""
         model.editRotation = 0
+        model.editCutout = nil
+        model.removingBackground = false
+        model.editNotice = nil
         model.editing = item.id
         model.previewOpen = true
         // 文字を打てるように、プレビューをキーウインドウにする
@@ -402,8 +438,18 @@ final class PanelController: NSObject, NSWindowDelegate {
         if save {
             let title = model.editTitle.trimmingCharacters(in: .whitespacesAndNewlines)
             if title != (item.title ?? "") { store.rename(item, to: title.isEmpty ? nil : title) }
-            if item.text != nil, model.editText != item.text { store.updateText(of: item, to: model.editText) }
-            if model.editRotation != 0 { store.rotateImage(of: item, quarterTurns: model.editRotation) }
+            if item.text != nil, model.editTextChanged, let view = model.editTextView {
+                let edited = NSAttributedString(attributedString: view.attributedString())
+                // 元が書式なしで、書式も付けていなければ、書式なしの文字のまま保存する
+                if model.editWasRich || RichText.hasFormatting(edited) {
+                    store.updateRichText(of: item, to: edited)
+                } else if edited.string != item.text {
+                    store.updateText(of: item, to: edited.string)
+                }
+            }
+            if model.editRotation != 0 || model.editCutout != nil {
+                store.updateImage(of: item, replacement: model.editCutout, quarterTurns: model.editRotation)
+            }
         }
         endEditing()
         panel.makeKeyAndOrderFront(nil)
@@ -412,7 +458,29 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func endEditing() {
         editingItem = nil
         model.editing = nil
+        model.editTextView = nil
+        model.editCutout = nil
+        model.removingBackground = false
         preview.allowsKey = false
+    }
+
+    /// 編集中の画像の背景を消す（Mac の中だけで切り抜く。1秒ほどかかる）
+    private func removeBackground(of item: ClipItem) {
+        guard let image = store.image(for: item)?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        model.removingBackground = true
+        model.editNotice = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try BackgroundRemover.cutout(image) }
+            DispatchQueue.main.async {
+                // 待っている間に編集を終えていたら捨てる
+                guard self.model.editing == item.id else { return }
+                self.model.removingBackground = false
+                switch result {
+                case .success(let cutout): self.model.editCutout = cutout
+                case .failure(let error): self.model.editNotice = error.localizedDescription
+                }
+            }
+        }
     }
 
     private func open(_ item: ClipItem, with app: URL?) {
@@ -635,8 +703,14 @@ final class PanelController: NSObject, NSWindowDelegate {
             return true
         default:
             guard command else { return false }
-            if event.charactersIgnoringModifiers?.lowercased() == "s" {
+            let chars = event.charactersIgnoringModifiers?.lowercased()
+            if chars == "s" {
                 finishEdit(save: true)
+                return true
+            }
+            // ⌘B・⌘I・⌘U で太字・斜体・下線
+            if model.editTextView != nil, let style = TextStyle.allCases.first(where: { $0.key == chars }) {
+                model.toggle(style)
                 return true
             }
             return sendEditAction(event)

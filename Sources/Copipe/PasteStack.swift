@@ -37,6 +37,7 @@ final class PasteStack: ObservableObject {
             window.setFrame(NSRect(x: visible.maxX - size.width - 16, y: visible.midY - size.height / 2,
                                    width: size.width, height: size.height), display: true)
         }
+        window.applyScreenSharingPreference()
         window.orderFrontRegardless()
         // 他のアプリで押した ⌘V を見る（アクセシビリティの許可が必要）
         pasteMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in

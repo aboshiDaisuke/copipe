@@ -20,6 +20,8 @@ final class ClipboardStore: ObservableObject {
     private var timer: Timer?
     private var retentionTimer: Timer?
     private let imageCache = NSCache<NSString, NSImage>()
+    /// 丸ごとのデータ（rawName）から読んだ書式付きの文字。書式がなければ空の文字
+    private let richTextCache = NSCache<NSString, NSAttributedString>()
 
     private let baseDir: URL
     private let imagesDir: URL
@@ -258,11 +260,13 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
-    /// 「新しいテキストアイテム」で入力した文字を履歴に入れる
-    func addManualText(_ text: String) {
+    /// 「新しいテキストアイテム」や copipe:// のリンクで受け取った文字を履歴に入れる。board があればそのピンボードにも入れる
+    func addManualText(_ text: String, to board: Pinboard? = nil) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        addToHistory(ClipItem(id: UUID(), kind: .text, text: text, sourceAppName: "Copipe",
-                              sourceBundleID: Bundle.main.bundleIdentifier, date: Date(), signature: "t:" + text))
+        let stored = addToHistory(ClipItem(id: UUID(), kind: .text, text: text, sourceAppName: "Copipe",
+                                           sourceBundleID: Bundle.main.bundleIdentifier, date: Date(),
+                                           signature: "t:" + text))
+        if let board { add(stored, to: board) }
     }
 
     /// 履歴の項目をクリップボードに戻す（自分自身の書き込みは記録しない）
@@ -404,6 +408,32 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    /// 「編集」で書き換えた書式付きの文字を保存する（貼り付けるときは書式付きで、⇧↵ なら書式なしで貼れる）
+    func updateRichText(of item: ClipItem, to text: NSAttributedString) {
+        guard !Self.isLink(text.string) else { return updateText(of: item, to: text.string) }
+        guard let idx = items.firstIndex(where: { $0.id == item.id }),
+              !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let raw = RichText.raw(for: text)
+        removeRawFile(of: items[idx])
+        items[idx].rawName = saveRaw(raw)
+        items[idx].rawSize = raw.totalSize
+        items[idx].text = text.string
+        items[idx].kind = .text
+        items[idx].signature = "t:" + text.string
+        pruneLinkPreviews()
+        save()
+    }
+
+    /// 書式付きの文字（コピーしたときに RTF があったものだけ。なければ nil）
+    func attributedText(for item: ClipItem) -> NSAttributedString? {
+        guard item.kind == .text, let name = item.rawName else { return nil }
+        if let cached = richTextCache.object(forKey: name as NSString) { return cached.length > 0 ? cached : nil }
+        let text = loadRaw(of: item).flatMap(RichText.attributedString(from:))
+        // 書式がないことも覚えておく（空の文字を入れておく）
+        richTextCache.setObject(text ?? NSAttributedString(), forKey: name as NSString)
+        return text
+    }
+
     /// 自分で名前を付ける（nil なら外す）
     func rename(_ item: ClipItem, to title: String?) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
@@ -436,22 +466,14 @@ final class ClipboardStore: ObservableObject {
                  material: item.material, ocrText: item.ocrText)
     }
 
-    /// 画像を 90° ずつ回す（quarterTurns が正なら右回り）。書き換えたら丸ごとのデータは古くなるので捨てる
-    func rotateImage(of item: ClipItem, quarterTurns: Int) {
+    /// 「編集」で変えた画像を保存する。replacement（背景を消した画像）があればそれに置き換え、
+    /// 90° ずつ回す（quarterTurns が正なら右回り）。書き換えたら丸ごとのデータは古くなるので捨てる
+    func updateImage(of item: ClipItem, replacement: CGImage? = nil, quarterTurns: Int) {
         let turns = ((quarterTurns % 4) + 4) % 4
-        guard turns != 0, let idx = items.firstIndex(where: { $0.id == item.id }),
-              let cgImage = image(for: items[idx])?.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return }
-        let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
-        let size = turns % 2 == 0 ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
-        guard let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
-                                      bytesPerRow: 0, space: space,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-        context.translateBy(x: size.width / 2, y: size.height / 2)
-        context.rotate(by: -CGFloat(turns) * .pi / 2) // CoreGraphics は左回りが正
-        context.draw(cgImage, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
-        guard let rotated = context.makeImage(),
-              let png = NSBitmapImageRep(cgImage: rotated).representation(using: .png, properties: [:]) else { return }
+        guard turns != 0 || replacement != nil, let idx = items.firstIndex(where: { $0.id == item.id }),
+              let source = replacement ?? image(for: items[idx])?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let edited = Self.rotate(source, quarterTurns: turns),
+              let png = NSBitmapImageRep(cgImage: edited).representation(using: .png, properties: [:]) else { return }
 
         let old = items[idx]
         let hash = Self.hash(png)
@@ -468,6 +490,21 @@ final class ClipboardStore: ObservableObject {
         removeImageFile(of: old)
         save()
         recognizeNextImage()
+    }
+
+    /// 90° ずつ回した画像（turns は 0〜3、右回り）
+    private static func rotate(_ image: CGImage, quarterTurns turns: Int) -> CGImage? {
+        guard turns != 0 else { return image }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        let size = turns % 2 == 0 ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
+        guard let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.translateBy(x: size.width / 2, y: size.height / 2)
+        context.rotate(by: -CGFloat(turns) * .pi / 2) // CoreGraphics は左回りが正
+        context.draw(image, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+        return context.makeImage()
     }
 
     // MARK: - 中身の読み取り

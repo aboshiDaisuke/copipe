@@ -51,6 +51,9 @@ final class SettingsModel: ObservableObject {
     }
     @Published var ignoreTransient = Preferences.ignoreTransient { didSet { Preferences.ignoreTransient = ignoreTransient } }
     @Published var linkPreviews = Preferences.linkPreviews { didSet { Preferences.linkPreviews = linkPreviews } }
+    @Published var showWhileScreenSharing = Preferences.showWhileScreenSharing {
+        didSet { Preferences.showWhileScreenSharing = showWhileScreenSharing }
+    }
     @Published var ignoredApps = Preferences.ignoredApps { didSet { Preferences.ignoredApps = ignoredApps } }
     @Published var pinboardHotKeys = Preferences.pinboardHotKeys { didSet { Preferences.pinboardHotKeys = pinboardHotKeys } }
     @Published var autoRules = Preferences.autoRules { didSet { Preferences.autoRules = autoRules } }
@@ -157,6 +160,10 @@ struct SettingsView: View {
                 Toggle(isOn: $model.linkPreviews) {
                     Text("リンクプレビューを生成する")
                     Text("リンク先のページの題名と画像を取ってきます。1回しか使えないリンクなどに影響することがあります。")
+                }
+                Toggle(isOn: $model.showWhileScreenSharing) {
+                    Text("画面共有中に表示")
+                    Text("オフのときは、画面共有・画面収録・スクリーンショットに Copipe の画面を写しません。使い方の動画を撮るときはオンにしてください。")
                 }
             }
 
@@ -377,7 +384,8 @@ enum HelpText {
         すぐ貼り付け　command + 1〜9
         コピーだけする　command + C
         プレビュー　space
-        編集（名前・文字・画像の向き）　command + E　保存は command + S、取り消しは esc
+        編集（名前・文字・書式・画像の向きと背景）　command + E　保存は command + S、取り消しは esc
+        編集中の太字・斜体・下線　command + B・I・U
         複製　command + D
         開く　command + O
         探す　そのまま文字を打つ
@@ -396,6 +404,10 @@ enum HelpText {
 
         カードは引っぱって他のアプリに入れられます（文字は書式なし。option を押しながらだと書式付き）。
         ピンボードの中では引っぱって並べ替えられます。
+
+        ショートカット App の「URL を開く」などからは、次のリンクで操作できます。
+        copipe://open（?pinboard=名前）　copipe://add?text=文字（&pinboard=名前）
+        copipe://pause（?minutes=分）　copipe://resume　copipe://stack
         """
     }
 }
