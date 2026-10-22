@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         store.onCapture = { [weak self] in self?.stack.collect($0) }
         panel.onPasted = { [weak self] in self?.stack.restoreAfterPaste() }
         panel.actionMenu = makeMenu(includeShow: false)
+        setupEditMenu()
         setupStatusItem()
         registerHotKey(Shortcut.current)
         registerStackHotKey(StackShortcut.current)
@@ -135,6 +136,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     // MARK: - メニュー（Paste と同じ構成）
+
+    /// メニューバーには出ないが、⌘X・⌘C・⌘V などを「新しいテキストアイテム」や名前の入力欄に届けるための編集メニュー
+    private func setupEditMenu() {
+        let edit = NSMenu(title: "編集")
+        edit.addItem(withTitle: "取り消す", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "やり直す", action: Selector(("redo:")), keyEquivalent: "z")
+            .keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "カット", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "コピー", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "ペースト", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "すべてを選択", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let main = NSMenu()
+        main.addItem(NSMenuItem()) // 先頭はアプリ名のメニューの場所
+        main.addItem(withTitle: "編集", action: nil, keyEquivalent: "").submenu = edit
+        NSApp.mainMenu = main
+    }
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)

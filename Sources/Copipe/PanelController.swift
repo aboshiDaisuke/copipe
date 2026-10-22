@@ -635,27 +635,34 @@ final class PanelController: NSObject, NSWindowDelegate {
             return true
         default:
             guard command else { return false }
-            let shift = event.modifierFlags.contains(.shift)
-            // メニューバーのないアプリなので、⌘C・⌘V などの編集操作はここで文字欄に送る
-            let action: Selector
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "s":
+            if event.charactersIgnoringModifiers?.lowercased() == "s" {
                 finishEdit(save: true)
                 return true
-            case "x": action = #selector(NSText.cut(_:))
-            case "c": action = #selector(NSText.copy(_:))
-            case "v": action = #selector(NSText.paste(_:))
-            case "a": action = #selector(NSText.selectAll(_:))
-            case "z": action = shift ? Selector(("redo:")) : Selector(("undo:"))
-            default: return false
             }
-            NSApp.sendAction(action, to: nil, from: self)
-            return true
+            return sendEditAction(event)
         }
+    }
+
+    /// メニューバーのないアプリなので、⌘X・⌘C・⌘V・⌘A・⌘Z の編集操作はここで文字欄に送る。送ったら true
+    private func sendEditAction(_ event: NSEvent) -> Bool {
+        let shift = event.modifierFlags.contains(.shift)
+        let action: Selector
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "x": action = #selector(NSText.cut(_:))
+        case "c": action = #selector(NSText.copy(_:))
+        case "v": action = #selector(NSText.paste(_:))
+        case "a": action = #selector(NSText.selectAll(_:))
+        case "z": action = shift ? Selector(("redo:")) : Selector(("undo:"))
+        default: return false
+        }
+        NSApp.sendAction(action, to: nil, from: self)
+        return true
     }
 
     /// 処理したら true（検索欄には渡さない）
     private func handle(_ event: NSEvent) -> Bool {
+        // 検索欄で日本語の変換中は、return・space・← → などを入力メソッドに渡す（確定の return で貼り付けないように）
+        if (panel.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return false }
         let items = model.visibleItems(in: store.items)
         let selected = model.selectedItems(in: items)
         let command = event.modifierFlags.contains(.command)
@@ -725,7 +732,9 @@ final class PanelController: NSObject, NSWindowDelegate {
             return true
         case "c":
             // 検索欄の文字を選んでいるときは、その文字をコピーする
-            if let editor = panel.firstResponder as? NSTextView, editor.selectedRange().length > 0 { return false }
+            if let editor = panel.firstResponder as? NSTextView, editor.selectedRange().length > 0 {
+                return sendEditAction(event)
+            }
             copy(selected, plainText: shift ? true : nil)
             return true
         case "e":
@@ -740,9 +749,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         case "y":
             model.previewOpen.toggle()
             return true
-        case "a" where model.query.isEmpty: // 検索中は検索欄の文字を全選択
+        case "a" where model.query.isEmpty:
             model.marked = Set(items.map(\.id))
             return true
+        case "a", "v", "x", "z": // 検索欄の文字の全選択・貼り付け・切り取り・取り消し
+            return sendEditAction(event)
         default:
             break
         }

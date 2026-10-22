@@ -18,6 +18,7 @@ final class ClipboardStore: ObservableObject {
 
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var timer: Timer?
+    private var retentionTimer: Timer?
     private let imageCache = NSCache<NSString, NSImage>()
 
     private let baseDir: URL
@@ -48,12 +49,20 @@ final class ClipboardStore: ObservableObject {
         load()
         migratePinnedItems()
         readMaterials()
-        trim()
+        normalizeLinks()
+        if trim() { save() }
     }
 
     func start() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
+        }
+        // 保存期間を過ぎた履歴は、何もコピーしなくても1時間ごとに消す
+        retentionTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.trim() else { return }
+                self.save()
+            }
         }
         recognizeNextImage()
     }
@@ -110,8 +119,9 @@ final class ClipboardStore: ObservableObject {
                   !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard string.utf8.count < 2_000_000 else { return nil }
             kind = Self.isLink(string) ? .link : .text
-            text = string
-            signature = "t:" + string
+            let stored = Self.normalized(string, kind: kind)
+            text = stored
+            signature = "t:" + stored
         } else if let image = NSImage(pasteboard: pb), let png = image.pngData() {
             kind = .image
             let name = Self.hash(png) + ".png"
@@ -162,6 +172,25 @@ final class ClipboardStore: ObservableObject {
         return ["http", "https"].contains(url.scheme?.lowercased() ?? "") && url.host != nil
     }
 
+    /// リンクは前後の改行・空白を取って持つ（付いたままだとサイト名が出せない。貼り付けはコピーしたときのデータのまま）
+    private static func normalized(_ text: String, kind: ClipKind) -> String {
+        kind == .link ? text.trimmingCharacters(in: .whitespacesAndNewlines) : text
+    }
+
+    /// 前のバージョンで、改行などが付いたまま保存したリンクを直す
+    private func normalizeLinks() {
+        var changed = false
+        for idx in items.indices where items[idx].kind == .link {
+            guard let text = items[idx].text else { continue }
+            let trimmed = Self.normalized(text, kind: .link)
+            guard trimmed != text else { continue }
+            items[idx].text = trimmed
+            items[idx].signature = "t:" + trimmed
+            changed = true
+        }
+        if changed { save() }
+    }
+
     /// 履歴の先頭に入れる。同じ内容が既にあればそれを先頭に移し、丸ごとのデータだけ新しいものにする
     @discardableResult
     private func addToHistory(_ item: ClipItem) -> ClipItem {
@@ -188,7 +217,9 @@ final class ClipboardStore: ObservableObject {
         return stored
     }
 
-    private func trim() {
+    /// 古い履歴を消す。消したものがあれば true（保存はしない）
+    @discardableResult
+    private func trim() -> Bool {
         var count = 0
         let limit = Retention.current.days.map { Date().addingTimeInterval(-Double($0) * 86_400) }
         var removed: [ClipItem] = []
@@ -203,6 +234,7 @@ final class ClipboardStore: ObservableObject {
         }
         removed.forEach(removeFiles)
         if !removed.isEmpty { pruneLinkPreviews() }
+        return !removed.isEmpty
     }
 
     /// 消えたリンクの題名・画像も消す
@@ -361,11 +393,13 @@ final class ClipboardStore: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == item.id }),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         removeRawFile(of: items[idx])
+        let kind: ClipKind = Self.isLink(text) ? .link : .text
+        let stored = Self.normalized(text, kind: kind)
         items[idx].rawName = nil
         items[idx].rawSize = nil
-        items[idx].text = text
-        items[idx].kind = Self.isLink(text) ? .link : .text
-        items[idx].signature = "t:" + text
+        items[idx].text = stored
+        items[idx].kind = kind
+        items[idx].signature = "t:" + stored
         pruneLinkPreviews()
         save()
     }
@@ -723,14 +757,28 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func load() {
-        if let data = try? Data(contentsOf: historyURL),
-           let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
-            items = decoded
+        if let data = try? Data(contentsOf: historyURL) {
+            if let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
+                items = decoded
+            } else {
+                keepUnreadable(historyURL)
+            }
         }
-        if let data = try? Data(contentsOf: pinboardsURL),
-           let decoded = try? JSONDecoder().decode([Pinboard].self, from: data) {
-            pinboards = decoded
+        if let data = try? Data(contentsOf: pinboardsURL) {
+            if let decoded = try? JSONDecoder().decode([Pinboard].self, from: data) {
+                pinboards = decoded
+            } else {
+                keepUnreadable(pinboardsURL)
+            }
         }
+    }
+
+    /// 読めなかったファイルを別の名前で残す（空のまま次に保存して、履歴を上書きで消してしまわないように）
+    private func keepUnreadable(_ url: URL) {
+        let stamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+            .replacingOccurrences(of: ":", with: "")
+        let name = url.deletingPathExtension().lastPathComponent + "-読み込めなかった-" + stamp + ".json"
+        try? FileManager.default.copyItem(at: url, to: url.deletingLastPathComponent().appendingPathComponent(name))
     }
 
     private func save() {
