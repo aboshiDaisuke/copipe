@@ -38,6 +38,8 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var material: MaterialInfo?
     /// 画像から読み取った文字（"" なら読み取り済みで文字なし、nil ならまだ）
     var ocrText: String?
+    /// ピンボードの中で貼り付け・コピーした回数（よく使うものほど左に並べる。nil は 0 回）
+    var useCount: Int?
 
     /// 検索（variants は SearchText.variants で作った、ひらがな・カタカナの言い換え）
     func matches(_ variants: [String]) -> Bool {

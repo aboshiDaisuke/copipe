@@ -703,7 +703,7 @@ struct ClipCard: View {
     }()
 }
 
-/// リンクのカード：上にページの画像、下に題名とサイト名（画像が取れないときは地球のマーク）
+/// リンクのカード：上にページの画像、下に題名とサイト名（画像が取れないときはサイトのアイコンか地球のマーク）
 struct LinkCardBody<Header: View>: View {
     let link: String
     @ObservedObject var previews: LinkPreviews
@@ -720,13 +720,27 @@ struct LinkCardBody<Header: View>: View {
                     .overlay(alignment: .top) { header(true) }
             } else {
                 header(false)
-                Image(systemName: "globe")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundStyle(.secondary)
-                    .frame(width: ClipCard.width, height: ClipCard.linkImageHeight - 44)
+                Group {
+                    if let icon = previews.icon(for: link) {
+                        // 小さいアイコンは大きく引き伸ばすとぼやけるので、そのくらいの大きさで出す
+                        let side = min(60, max(32, icon.pixelSize.width))
+                        Image(nsImage: icon)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(width: side, height: side)
+                            .clipShape(RoundedRectangle(cornerRadius: side * 0.22, style: .continuous))
+                    } else {
+                        Image(systemName: "globe")
+                            .font(.system(size: 44, weight: .light))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: ClipCard.width, height: ClipCard.linkImageHeight - 44)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(previews.title(for: link) ?? URL(string: link)?.host ?? link)
+                // 題名が取れないときは、サイト名を2行続けて出さずに、リンクそのものを出す
+                Text(previews.title(for: link) ?? link)
                     .font(.system(size: 15, weight: .semibold))
                     .lineLimit(2)
                 Text(URL(string: link)?.host ?? link)

@@ -145,6 +145,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var dragStart: (event: NSEvent, item: UUID)?
     /// 引っぱっているピンボードのタブ
     private var draggingTab: UUID?
+    /// 引っぱり出しているカード（他のアプリに入れたら、使ったものとして数える）
+    private var draggedItems: [ClipItem] = []
     /// 「…」ボタンで出すメニュー（Paste と同じ構成）
     var actionMenu: NSMenu?
     /// 前面のアプリに貼り付けたあと（ペーストスタックがクリップボードを戻すため）
@@ -340,6 +342,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func paste(_ list: [ClipItem], plainText: Bool? = nil) {
         guard !list.isEmpty else { return }
         store.copyToPasteboard(list, plainText: plainText ?? Preferences.alwaysPlainText)
+        store.recordUse(list)
         hide()
         // 「クリップボードへ」の設定か、許可がなければクリップボードに入れるだけ
         guard Preferences.pasteToActiveApp, Paster.isTrusted else {
@@ -356,6 +359,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func copy(_ list: [ClipItem], plainText: Bool? = nil) {
         guard !list.isEmpty else { return }
         store.copyToPasteboard(list, plainText: plainText ?? Preferences.alwaysPlainText)
+        store.recordUse(list)
         Sound.copied()
         hide()
     }
@@ -365,6 +369,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         let texts = list.compactMap(\.expandedText)
         guard !texts.isEmpty else { return }
         store.copyString(transform.apply(texts.joined(separator: "\n")))
+        store.recordUse(list)
         hide()
         guard Preferences.pasteToActiveApp, Paster.isTrusted else {
             Sound.copied()
@@ -640,6 +645,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             return draggingItem
         }
         model.dragging = item.id
+        draggedItems = list
         let session = view.beginDraggingSession(with: draggingItems, event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
     }
@@ -848,5 +854,8 @@ extension PanelController: NSDraggingSource {
         // どこで離しても（取り消しても）印を消す
         model.dragging = nil
         model.dropBoard = nil
+        // 他のアプリに入れたとき（Copipe の中での並べ替えは .move）は、使ったものとして数える
+        if operation == .copy { store.recordUse(draggedItems) }
+        draggedItems = []
     }
 }

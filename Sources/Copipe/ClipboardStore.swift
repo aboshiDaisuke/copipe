@@ -444,7 +444,10 @@ final class ClipboardStore: ObservableObject {
     /// 同じ内容の項目をすぐ隣に作る
     func duplicate(_ item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items.insert(copy(of: item, pinboardID: item.pinboardID), at: idx + 1)
+        var duplicate = copy(of: item, pinboardID: item.pinboardID)
+        // すぐ隣に置くので、使った回数も同じにする（よく使う順の並びを崩さない）
+        duplicate.useCount = item.useCount
+        items.insert(duplicate, at: idx + 1)
         save()
     }
 
@@ -453,9 +456,33 @@ final class ClipboardStore: ObservableObject {
         guard let from = items.firstIndex(where: { $0.id == draggedID }),
               let to = items.firstIndex(where: { $0.id == targetID }), from != to,
               items[from].pinboardID != nil, items[from].pinboardID == items[to].pinboardID else { return }
+        let targetCount = items[to].useCount
         let moved = items.remove(at: from)
         items.insert(moved, at: to)
+        // よく使う順の並びが崩れないように、引っぱった先の項目と同じ回数にする（次に使うまでその場所にいる）
+        items[to].useCount = targetCount
         save()
+    }
+
+    /// ピンボードの項目を貼り付け・コピーした回数を数えて、よく使うものほど左に来るように動かす
+    /// （同じ回数なら、最近使ったものが左）
+    func recordUse(_ list: [ClipItem]) {
+        var changed = false
+        for item in list where item.pinboardID != nil {
+            guard let idx = items.firstIndex(where: { $0.id == item.id }) else { continue }
+            let count = (items[idx].useCount ?? 0) + 1
+            items[idx].useCount = count
+            let board = items[idx].pinboardID
+            // 同じピンボードの中で、回数が同じか少ないものより左へ
+            var target = idx
+            for j in stride(from: idx - 1, through: 0, by: -1) where items[j].pinboardID == board {
+                guard (items[j].useCount ?? 0) <= count else { break }
+                target = j
+            }
+            if target != idx { items.insert(items.remove(at: idx), at: target) }
+            changed = true
+        }
+        if changed { save() }
     }
 
     private func copy(of item: ClipItem, pinboardID: UUID?) -> ClipItem {

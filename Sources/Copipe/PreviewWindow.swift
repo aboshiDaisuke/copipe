@@ -250,6 +250,13 @@ struct PreviewView: View {
                     .scaledToFit()
                     .frame(maxHeight: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else if let icon = links.icon(for: link) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 96, height: 96)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             } else {
                 Image(systemName: "globe")
                     .font(.system(size: 56, weight: .light))
