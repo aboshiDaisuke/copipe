@@ -40,6 +40,8 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var ocrText: String?
     /// ピンボードの中で貼り付け・コピーした回数（よく使うものほど左に並べる。nil は 0 回）
     var useCount: Int?
+    /// 貼り付けたアプリ（bundle ID。新しい順に 5 つまで。「提案」でそのアプリでよく貼るものを先に出す）
+    var pastedApps: [String]?
 
     /// 検索（variants は SearchText.variants で作った、ひらがな・カタカナの言い換え）
     func matches(_ variants: [String]) -> Bool {

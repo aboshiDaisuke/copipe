@@ -464,6 +464,19 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    /// どのアプリに貼り付けたかを覚える（「提案」で、そのアプリでよく貼るものを先に出すため）
+    func recordPaste(_ list: [ClipItem], into bundleID: String?) {
+        guard let bundleID else { return }
+        for item in list {
+            guard let idx = items.firstIndex(where: { $0.id == item.id }) else { continue }
+            var apps = items[idx].pastedApps ?? []
+            apps.removeAll { $0 == bundleID }
+            apps.insert(bundleID, at: 0)
+            items[idx].pastedApps = Array(apps.prefix(5))
+        }
+        save()
+    }
+
     /// ピンボードの項目を貼り付け・コピーした回数を数えて、よく使うものほど左に来るように動かす
     /// （同じ回数なら、最近使ったものが左）
     func recordUse(_ list: [ClipItem]) {

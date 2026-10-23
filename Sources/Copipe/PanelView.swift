@@ -65,10 +65,16 @@ struct PanelView: View {
                 .help("メニュー")
             }
             HStack(spacing: 4) {
-                tab("クリップボード", dot: .secondary, active: model.board == nil) { model.board = nil }
+                tab("クリップボード", dot: .secondary, active: !model.suggesting && model.board == nil) {
+                    model.suggesting = false
+                    model.board = nil
+                }
+                // 貼り付け先のアプリの様子から、次に貼りそうなものを選ぶ（Apple Intelligence）
+                tab("提案", dot: .purple, symbol: "sparkles", active: model.suggesting) { model.suggesting = true }
                 ForEach(store.pinboards) { board in
-                    tab(board.name, dot: Color(rgb: board.color), active: model.board == board.id,
+                    tab(board.name, dot: Color(rgb: board.color), active: !model.suggesting && model.board == board.id,
                         dropping: model.dropBoard == board.id) {
+                        model.suggesting = false
                         model.board = board.id
                     }
                     // カードをタブに落とすと、そのピンボードに入る（まとめて選んだカードは全部）
@@ -130,11 +136,15 @@ struct PanelView: View {
         .background(Color.primary.opacity(model.query.isEmpty ? 0.05 : 0.1), in: Capsule())
     }
 
-    private func tab(_ title: String, dot: Color, active: Bool, dropping: Bool = false,
+    private func tab(_ title: String, dot: Color, symbol: String? = nil, active: Bool, dropping: Bool = false,
                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Circle().fill(dot).frame(width: 8, height: 8)
+                if let symbol {
+                    Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).foregroundStyle(dot)
+                } else {
+                    Circle().fill(dot).frame(width: 8, height: 8)
+                }
                 Text(title).font(.system(size: 13, weight: active || dropping ? .semibold : .regular))
             }
             .padding(.horizontal, 12)
@@ -228,16 +238,31 @@ struct PanelView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: "doc.on.clipboard").font(.system(size: 32)).foregroundStyle(.secondary)
-            Text(emptyMessage)
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+            if model.suggesting && model.suggestionState != .ready {
+                ProgressView().controlSize(.small)
+                Text("貼り付け先に合いそうなものを探しています…")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: model.suggesting ? "sparkles" : "doc.on.clipboard")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.secondary)
+                Text(emptyMessage)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var emptyMessage: String {
         if !model.query.isEmpty || model.isFiltered { return "見つかりませんでした" }
+        if model.suggesting {
+            return model.accessibilityGranted
+                ? "提案はありません。書いている文章やそのアプリでよく貼るものに合わせて、ここに出します。"
+                : "提案はありません。「アクセシビリティ」を許可すると、書いている文章に合わせて提案します。"
+        }
         if model.board != nil { return "このピンボードは空です。カードを右クリックして「ピンボードに追加」で入れられます。" }
         return "まだ履歴がありません。何かコピーしてみてください。"
     }
@@ -379,11 +404,12 @@ struct ReorderDrop: DropDelegate {
     let store: ClipboardStore
 
     func validateDrop(info: DropInfo) -> Bool {
-        model.dragging != nil && target.pinboardID != nil
+        // 「提案」のタブでは並べ替えない
+        model.dragging != nil && target.pinboardID != nil && !model.suggesting
     }
 
     func dropEntered(info: DropInfo) {
-        guard let dragged = model.dragging, dragged != target.id, target.pinboardID != nil else { return }
+        guard let dragged = model.dragging, dragged != target.id, target.pinboardID != nil, !model.suggesting else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             store.move(dragged, to: target.id)
         } else {

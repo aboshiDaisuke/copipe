@@ -382,12 +382,14 @@ enum HelpText {
         複製　command + D
         開く　command + O
         探す　そのまま文字を打つ
-        クリップボード・ピンボードの切り替え　command + ← →（tab でも可）
+        クリップボード・提案・ピンボードの切り替え　command + ← →（tab でも可）
         ピンボードに追加 / 外す　command + P
         削除　command + delete
         閉じる　esc
         ペーストスタック　\(StackShortcut.current.title)（始めてからコピーしたものを、⌘V のたびに順に貼り付け）
         ピンボードを直接開く　control + command + 1〜9
+
+        「提案」のタブを開くと、貼り付け先のアプリで書いている文章や、そのアプリでよく貼るものから、次に貼りそうなものを出します（Apple Intelligence を Mac の中だけで使います）。
 
         検索は、ひらがな・カタカナ、全角・半角、大文字・小文字を区別しません。
         画像の中の文字や、Final Cut Pro の素材のクリップ名・テロップ・エフェクト名でも探せます。

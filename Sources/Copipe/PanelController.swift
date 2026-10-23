@@ -16,6 +16,11 @@ final class PanelModel: ObservableObject {
     @Published var date: DateFilter = .all { didSet { resetSelection() } }
     /// 表示中のピンボード（nil ならクリップボードの履歴）
     @Published var board: UUID? { didSet { resetSelection() } }
+    /// 「提案」のタブを開いているか（開いているときは board を見ない）
+    @Published var suggesting = false { didSet { resetSelection() } }
+    /// 提案した項目（合う順）
+    @Published var suggestions: [UUID] = []
+    @Published var suggestionState: SuggestionState = .idle
     /// カーソルのあるカード
     @Published var selection = 0
     /// ⌘・⇧ でまとめて選んだカード（空ならカーソルのカードだけ）
@@ -63,9 +68,11 @@ final class PanelModel: ObservableObject {
 
     func visibleItems(in items: [ClipItem]) -> [ClipItem] {
         let variants = SearchText.variants(of: query)
-        return items.filter {
-            $0.pinboardID == board && filter.matches($0) && (app == nil || $0.sourceBundleID == app)
-                && date.matches($0.date) && $0.matches(variants)
+        let source = suggesting
+            ? suggestions.compactMap { id in items.first { $0.id == id } }
+            : items.filter { $0.pinboardID == board }
+        return source.filter {
+            filter.matches($0) && (app == nil || $0.sourceBundleID == app) && date.matches($0.date) && $0.matches(variants)
         }
     }
 
@@ -140,6 +147,9 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// 編集を始めたときのカード（保存するときに使う）
     private var editingItem: ClipItem?
     private var previewSubscription: AnyCancellable?
+    private var suggestSubscription: AnyCancellable?
+    /// パネルを開いたときに前にいたアプリ（貼り付け先。「提案」でその様子を読む）
+    private var targetApp: NSRunningApplication?
     private var keyMonitor: Any?
     /// マウスを押した場所とカード（少し動かしたら引っぱり出しを始める）
     private var dragStart: (event: NSEvent, item: UUID)?
@@ -190,6 +200,9 @@ final class PanelController: NSObject, NSWindowDelegate {
                 if open { self?.showPreview() } else { self?.preview.orderOut(nil) }
             }
         }
+        suggestSubscription = model.$suggesting.removeDuplicates().sink { [weak self] suggesting in
+            MainActor.assumeIsolated { if suggesting { self?.startSuggesting() } }
+        }
     }
 
     func toggle() {
@@ -198,12 +211,18 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     /// ⌃⌘1〜9: そのピンボードを開く（開いていれば閉じる）
     func toggle(board: UUID) {
-        panel.isVisible && model.board == board ? hide() : show(board: board)
+        panel.isVisible && !model.suggesting && model.board == board ? hide() : show(board: board)
     }
 
     func show(board: UUID? = nil) {
+        // Copipe 自身が前面のとき（Finder から開いたときなど）は、貼り付け先が分からない
+        let front = NSWorkspace.shared.frontmostApplication
+        targetApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
         model.query = ""
         model.clearFilters()
+        model.suggesting = false
+        model.suggestions = []
+        model.suggestionState = .idle
         model.board = board
         model.selection = 0
         model.previewOpen = false
@@ -349,6 +368,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             Sound.copied()
             return
         }
+        store.recordPaste(list, into: targetApp?.bundleIdentifier)
         Sound.pasted()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             Paster.sendCommandV()
@@ -375,6 +395,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             Sound.copied()
             return
         }
+        store.recordPaste(list, into: targetApp?.bundleIdentifier)
         Sound.pasted()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             Paster.sendCommandV()
@@ -686,11 +707,35 @@ final class PanelController: NSObject, NSWindowDelegate {
         return NSEvent(cgEvent: cg) ?? event
     }
 
-    /// 隣のタブ（クリップボード・ピンボード）に移る。端まで行ったら反対側に戻る
+    /// 隣のタブ（クリップボード・提案・ピンボード）に移る。端まで行ったら反対側に戻る
     private func switchBoard(by step: Int) {
-        let tabs: [UUID?] = [nil] + store.pinboards.map(\.id)
-        let current = tabs.firstIndex(of: model.board) ?? 0
-        model.board = tabs[(current + step + tabs.count) % tabs.count]
+        // 1 番目が「提案」
+        let tabs: [UUID?] = [nil, nil] + store.pinboards.map(\.id)
+        let current = model.suggesting ? 1 : model.board.flatMap { id in
+            store.pinboards.firstIndex { $0.id == id }.map { $0 + 2 }
+        } ?? 0
+        let next = (current + step + tabs.count) % tabs.count
+        model.suggesting = next == 1
+        model.board = tabs[next]
+    }
+
+    // MARK: - 提案
+
+    /// 「提案」を開いたら、貼り付け先のアプリの様子を読んで、次に貼りそうなものを選ぶ（パネルを開くごとに 1 回）
+    private func startSuggesting() {
+        guard model.suggestionState == .idle else { return }
+        model.suggestionState = .thinking
+        let app = targetApp
+        let token = model.showToken
+        Task {
+            // 他のアプリへの問い合わせは待たされることがあるので、メインスレッドの外で
+            let context = await Task.detached { app.map(WorkContext.read) }.value
+            let picked = await Suggestions.pick(from: store.items, pinboards: store.pinboards, context: context)
+            // 待っている間にパネルを開き直していたら捨てる
+            guard model.showToken == token else { return }
+            model.suggestions = picked
+            model.suggestionState = .ready
+        }
     }
 
     /// 編集中のプレビューでのキー（esc で取り消し、⌘S・⌘return で保存）。処理したら true
