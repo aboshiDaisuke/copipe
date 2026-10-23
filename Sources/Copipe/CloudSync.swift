@@ -30,9 +30,18 @@ final class CloudSync: ObservableObject {
         }
     }
 
+    /// iCloud Drive を読み書きする許可がない
+    private struct NoPermission: LocalizedError {
+        var errorDescription: String? {
+            "iCloud Drive を読み書きする許可がありません。システム設定 > プライバシーとセキュリティ > ファイルとフォルダ で、Copipe の「iCloud Drive」をオンにしてください"
+        }
+    }
+
     @Published private(set) var status: Status = .off
     /// 同じ iCloud で同期しているほかの Mac の名前
     @Published private(set) var otherMacs: [String] = []
+    /// ほかの Mac の項目で、画像などが iCloud から届くのを待っているものの数
+    @Published private(set) var waitingItems = 0
 
     static var isEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "iCloudSync") }
@@ -45,8 +54,9 @@ final class CloudSync: ObservableObject {
 
     /// 消した記録はこの日数で忘れる（これより長く同期していなかった Mac から、消したものが戻ることがある）
     private static let tombstoneDays = 90.0
-    /// 画像などが iCloud に届くのをこの時間まで待つ。過ぎたら画像・丸ごとのデータなしで取り込む
-    private static let missingFileWait: TimeInterval = 30 * 60
+    /// 画像などが iCloud から届くのをこの時間まで待つ。過ぎたら丸ごとのデータなしで取り込む
+    /// （初めて同期する Mac は数百 MB を受け取ることがあるので長めに）
+    private static let missingFileWait: TimeInterval = 6 * 3600
 
     private let store: ClipboardStore
     private let stateURL: URL
@@ -132,8 +142,9 @@ final class CloudSync: ObservableObject {
                 try await cycle()
                 status = .synced(Date())
             } catch {
-                status = .failed(error.localizedDescription)
+                status = .failed(Self.isPermissionError(error) ? NoPermission().localizedDescription : error.localizedDescription)
             }
+            waitingItems = missingSince.count
             busy = false
             if again {
                 again = false
@@ -184,7 +195,8 @@ final class CloudSync: ObservableObject {
         where url.pathExtension == "json" && url.deletingPathExtension().lastPathComponent != own {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             guard known[url.lastPathComponent] != date else { continue }
-            try? fm.startDownloadingUbiquitousItem(at: url)
+            // まだ iCloud から届いていなければ、取りに行くよう頼んで次の回に読む
+            guard isDownloaded(url) else { continue }
             guard let data = try? Data(contentsOf: url),
                   let snapshot = try? decoder.decode(Snapshot.self, from: data) else { continue }
             for entry in snapshot.items {
@@ -202,15 +214,32 @@ final class CloudSync: ObservableObject {
         return result
     }
 
-    /// iCloud のファイルをこの Mac に写す（まだ iCloud から届いていなければ、取りに行くよう頼むだけ）
+    /// iCloud のファイルをこの Mac に写す（まだ iCloud から届いていなければ、取りに行くよう頼むだけで待たない）
     private nonisolated static func download(_ source: URL, to dest: URL) {
         let fm = FileManager.default
-        guard !fm.fileExists(atPath: dest.path) else { return }
-        guard fm.fileExists(atPath: source.path), let data = try? Data(contentsOf: source) else {
-            try? fm.startDownloadingUbiquitousItem(at: source)
-            return
-        }
+        guard !fm.fileExists(atPath: dest.path), isDownloaded(source),
+              let data = try? Data(contentsOf: source) else { return }
         try? data.write(to: dest, options: .atomic)
+    }
+
+    /// iCloud のファイルの中身がこの Mac にあるか。なければ取りに行くよう頼んで false
+    /// （中身のないファイルをそのまま読むと、届くまで待たされる。初めての Mac では数百 MB になるので待たない）
+    private nonisolated static func isDownloaded(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        guard FileManager.default.fileExists(atPath: url.path),
+              values?.isUbiquitousItem != true || values?.ubiquitousItemDownloadingStatus == .current else {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            return false
+        }
+        return true
+    }
+
+    private nonisolated static func isPermissionError(_ error: Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain,
+           [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(error.code) { return true }
+        let posix = (error.userInfo[NSUnderlyingErrorKey] as? NSError) ?? error
+        return posix.domain == NSPOSIXErrorDomain && [Int(EPERM), Int(EACCES)].contains(posix.code)
     }
 
     // MARK: - そろえる

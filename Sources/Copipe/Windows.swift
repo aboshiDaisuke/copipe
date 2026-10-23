@@ -127,6 +127,11 @@ struct SettingsView: View {
                         Button("今すぐ同期") { sync.syncNow() }
                             .controlSize(.small)
                     }
+                    if sync.waitingItems > 0 {
+                        Text("ほかの Mac の画像などを iCloud から受け取っています（残り \(sync.waitingItems) 件）")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
                     if !sync.otherMacs.isEmpty {
                         Text("同期している Mac: " + sync.otherMacs.joined(separator: "、"))
                             .font(.system(size: 12))
