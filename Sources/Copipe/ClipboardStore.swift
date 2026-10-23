@@ -36,6 +36,8 @@ final class ClipboardStore: ObservableObject {
 
     /// コピーを記録したときに呼ぶ（ペーストスタックがためるため）
     var onCapture: ((ClipItem) -> Void)?
+    /// 履歴・ピンボードを保存したときに呼ぶ（iCloud 同期が書き出すため）
+    var onSave: (() -> Void)?
 
     typealias Source = (appName: String?, bundleID: String?)
 
@@ -769,6 +771,25 @@ final class ClipboardStore: ObservableObject {
         return pinboards[idx]
     }
 
+    // MARK: - iCloud 同期
+
+    /// ほかの Mac とそろえた結果に置き換える（もうどの項目も使わない画像・丸ごとのデータは消す）
+    func replaceForSync(items newItems: [ClipItem], pinboards newBoards: [Pinboard]) {
+        let old = items
+        items = newItems
+        pinboards = newBoards
+        let images = Set(items.compactMap(\.imageName)), raws = Set(items.compactMap(\.rawName))
+        for item in old {
+            if let name = item.imageName, !images.contains(name) { removeImageFile(of: item) }
+            if let name = item.rawName, !raws.contains(name) { removeRawFile(of: item) }
+        }
+        trim()
+        pruneLinkPreviews()
+        savePinboards()
+        save()
+        recognizeNextImage()
+    }
+
     // MARK: - ファイル
 
     func image(for item: ClipItem) -> NSImage? {
@@ -861,11 +882,13 @@ final class ClipboardStore: ObservableObject {
     private func save() {
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? data.write(to: historyURL, options: .atomic)
+        onSave?()
     }
 
     private func savePinboards() {
         guard let data = try? JSONEncoder().encode(pinboards) else { return }
         try? data.write(to: pinboardsURL, options: .atomic)
+        onSave?()
     }
 }
 

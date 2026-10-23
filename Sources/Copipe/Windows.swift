@@ -44,6 +44,7 @@ final class SettingsModel: ObservableObject {
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var showMenuBarIcon = Preferences.showMenuBarIcon { didSet { Preferences.showMenuBarIcon = showMenuBarIcon } }
     @Published var soundEffects = Preferences.soundEffects { didSet { Preferences.soundEffects = soundEffects } }
+    @Published var iCloudSync = CloudSync.isEnabled
     @Published var pasteToActiveApp = Preferences.pasteToActiveApp { didSet { Preferences.pasteToActiveApp = pasteToActiveApp } }
     @Published var alwaysPlainText = Preferences.alwaysPlainText { didSet { Preferences.alwaysPlainText = alwaysPlainText } }
     @Published var ignoreConfidential = Preferences.ignoreConfidential {
@@ -62,6 +63,7 @@ final class SettingsModel: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject var store: ClipboardStore
+    @ObservedObject var sync: CloudSync
     @ObservedObject var model: SettingsModel
     var onShortcutChange: (Shortcut) -> Void
     var onStackShortcutChange: (StackShortcut) -> Void
@@ -107,6 +109,30 @@ struct SettingsView: View {
                 .onChange(of: model.showMenuBarIcon) { onMenuBarIconChange(model.showMenuBarIcon) }
 
                 Toggle("効果音（コピー・貼り付けのときに音を鳴らす）", isOn: $model.soundEffects)
+            }
+
+            Section("iCloud 同期") {
+                Toggle(isOn: $model.iCloudSync) {
+                    Text("iCloud で同期する")
+                    Text("iCloud Drive を通して、ほかの Mac の Copipe と履歴・ピンボードをそろえます。同期したい Mac それぞれでオンにしてください。")
+                }
+                .onChange(of: model.iCloudSync) { sync.setEnabled(model.iCloudSync) }
+
+                if model.iCloudSync {
+                    HStack {
+                        Text(sync.status.text)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("今すぐ同期") { sync.syncNow() }
+                            .controlSize(.small)
+                    }
+                    if !sync.otherMacs.isEmpty {
+                        Text("同期している Mac: " + sync.otherMacs.joined(separator: "、"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("貼り付け") {

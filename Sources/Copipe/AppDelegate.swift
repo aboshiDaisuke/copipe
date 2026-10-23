@@ -4,6 +4,7 @@ import Carbon.HIToolbox
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let store = ClipboardStore()
+    private lazy var sync = CloudSync(store: store)
     private let windows = WindowPresenter()
     private var panel: PanelController!
     private var stack: PasteStack!
@@ -23,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store.start()
+        sync.start()
         panel = PanelController(store: store)
         stack = PasteStack(store: store)
         store.onCapture = { [weak self] in self?.stack.collect($0) }
@@ -307,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc private func showSettings() {
         panel.hide()
         windows.present(id: "settings", title: "Copipe の設定", size: CGSize(width: 480, height: 640)) {
-            SettingsView(store: store, model: SettingsModel(),
+            SettingsView(store: store, sync: sync, model: SettingsModel(),
                          onShortcutChange: { [weak self] in self?.registerHotKey($0) },
                          onStackShortcutChange: { [weak self] in self?.registerStackHotKey($0) },
                          onPinboardHotKeysChange: { [weak self] in self?.registerPinboardHotKeys($0) },
