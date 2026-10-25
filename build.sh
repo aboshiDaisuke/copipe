@@ -19,11 +19,39 @@ for s in 16 32 128 256 512; do
     sips -z $((s * 2)) $((s * 2)) Support/icon_1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
-# 自分用の証明書があればそれで署名する（ビルドし直してもアクセシビリティの許可が外れない）
+# 自分用の証明書で署名する（ビルドし直してもアクセシビリティの許可が外れない）
+# なければ作ってログインキーチェーンに入れる（codesign だけは確認なしで使えるようにする）
+if ! security find-identity -p codesigning | grep -q "Copipe Local Signing"; then
+    CERT_DIR=$(mktemp -d)
+    cat > "$CERT_DIR/cert.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = Copipe Local Signing
+[ext]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+EOF
+    PASS=$(openssl rand -hex 12)
+    if openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$CERT_DIR/cert.cnf" \
+           -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" 2>/dev/null &&
+       { openssl pkcs12 -export -legacy -inkey "$CERT_DIR/key.pem" -in "$CERT_DIR/cert.pem" \
+             -out "$CERT_DIR/id.p12" -passout "pass:$PASS" 2>/dev/null ||
+         openssl pkcs12 -export -inkey "$CERT_DIR/key.pem" -in "$CERT_DIR/cert.pem" \
+             -out "$CERT_DIR/id.p12" -passout "pass:$PASS"; } &&
+       security import "$CERT_DIR/id.p12" -k ~/Library/Keychains/login.keychain-db -P "$PASS" -T /usr/bin/codesign >/dev/null; then
+        echo "署名用の証明書「Copipe Local Signing」を作りました（初回は、入れ替えたあとにアクセシビリティを許可し直してください）"
+    fi
+    rm -rf "$CERT_DIR"
+fi
 if security find-identity -p codesigning | grep -q "Copipe Local Signing"; then
     codesign --force --sign "Copipe Local Signing" "$APP"
 else
     codesign --force --sign - "$APP"
+    echo "注意: 証明書を作れなかったので仮の署名にしました。入れ替えるとアクセシビリティの許可が外れます" >&2
 fi
 echo "ビルド完了: $APP"
 
