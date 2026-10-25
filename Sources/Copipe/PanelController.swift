@@ -707,15 +707,15 @@ final class PanelController: NSObject, NSWindowDelegate {
         return NSEvent(cgEvent: cg) ?? event
     }
 
-    /// 隣のタブ（クリップボード・提案・ピンボード）に移る。端まで行ったら反対側に戻る
+    /// 隣のタブ（クリップボード・ピンボード・提案）に移る。端まで行ったら反対側に戻る
     private func switchBoard(by step: Int) {
-        // 1 番目が「提案」
-        let tabs: [UUID?] = [nil, nil] + store.pinboards.map(\.id)
-        let current = model.suggesting ? 1 : model.board.flatMap { id in
-            store.pinboards.firstIndex { $0.id == id }.map { $0 + 2 }
+        // 最後が「提案」
+        let tabs: [UUID?] = [nil] + store.pinboards.map(\.id) + [nil]
+        let current = model.suggesting ? tabs.count - 1 : model.board.flatMap { id in
+            store.pinboards.firstIndex { $0.id == id }.map { $0 + 1 }
         } ?? 0
         let next = (current + step + tabs.count) % tabs.count
-        model.suggesting = next == 1
+        model.suggesting = next == tabs.count - 1
         model.board = tabs[next]
     }
 

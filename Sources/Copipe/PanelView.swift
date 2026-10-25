@@ -69,8 +69,6 @@ struct PanelView: View {
                     model.suggesting = false
                     model.board = nil
                 }
-                // 貼り付け先のアプリの様子から、次に貼りそうなものを選ぶ（Apple Intelligence）
-                tab("提案", dot: .purple, symbol: "sparkles", active: model.suggesting) { model.suggesting = true }
                 ForEach(store.pinboards) { board in
                     tab(board.name, dot: Color(rgb: board.color), active: !model.suggesting && model.board == board.id,
                         dropping: model.dropBoard == board.id) {
@@ -103,6 +101,9 @@ struct PanelView: View {
                         Button("削除…", role: .destructive) { onDeletePinboard(board) }
                     }
                 }
+                // 貼り付け先のアプリの様子から、次に貼りそうなものを選ぶ（Apple Intelligence）
+                // 右端に置く（Tab でピンボードへ移るときに通らないように）
+                tab("提案", dot: .purple, symbol: "sparkles", active: model.suggesting) { model.suggesting = true }
                 Button(action: onNewPinboard) {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .semibold))
