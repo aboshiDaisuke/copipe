@@ -113,15 +113,18 @@ enum Suggestions {
     /// 出す数
     static let limit = 8
     /// AI に見せる候補の数（多すぎると Mac の中の AI が一度に読める量を超える）
-    private static let candidateLimit = 24
+    nonisolated private static let candidateLimit = 24
 
     /// 次に貼りそうな項目を、合う順に選ぶ
     static func pick(from items: [ClipItem], pinboards: [Pinboard], context: WorkContext?) async -> [UUID] {
         let pastedHere = items.filter { item in context?.bundleID.map { item.pastedApps?.contains($0) == true } ?? false }
             .sorted { $0.date > $1.date }
         guard let context else { return Array(pastedHere.prefix(limit).map(\.id)) }
-        let keywords = Self.keywords(in: context.allText)
-        let candidates = Self.candidates(from: items, context: context, keywords: keywords)
+        // 履歴を全部読むので、メインスレッドの外で（ここで止まると、パネルのキー操作が引っかかる）
+        let (keywords, candidates) = await Task.detached {
+            let keywords = Self.keywords(in: context.allText)
+            return (keywords, Self.candidates(from: items, context: context, keywords: keywords))
+        }.value
         var picked: [ClipItem]
         if #available(macOS 26.0, *), let chosen = await ask(context: context, candidates: candidates, pinboards: pinboards) {
             picked = chosen
@@ -137,7 +140,7 @@ enum Suggestions {
     // MARK: - 候補を絞る
 
     /// 言葉が合うもの・このアプリに貼ったもの・最近のもの・よく使うピンボードの項目から、AI に見せる候補を選ぶ
-    private static func candidates(from items: [ClipItem], context: WorkContext, keywords: [String]) -> [ClipItem] {
+    nonisolated private static func candidates(from items: [ClipItem], context: WorkContext, keywords: [String]) -> [ClipItem] {
         var seen = Set<String>()
         var result: [ClipItem] = []
         func add(_ list: some Sequence<ClipItem>) {
@@ -156,24 +159,31 @@ enum Suggestions {
         return result
     }
 
-    private static func score(_ item: ClipItem, keywords: [String], bundleID: String?) -> Double {
-        let haystack = [String((item.text ?? "").prefix(3000)), item.title, item.ocrText,
-                        item.material?.names.joined(separator: " "), item.filePaths?.joined(separator: " ")]
-            .compactMap { $0 }.joined(separator: "\n")
-        var score = Double(keywords.filter { SearchText.contains(haystack, $0) }.count)
+    /// keywords は folded でそろえたもの
+    nonisolated private static func score(_ item: ClipItem, keywords: [String], bundleID: String?) -> Double {
+        let haystack = folded([String((item.text ?? "").prefix(3000)), item.title, item.ocrText,
+                               item.material?.names.joined(separator: " "), item.filePaths?.joined(separator: " ")]
+            .compactMap { $0 }.joined(separator: "\n"))
+        // 先にそろえておけば、そのまま探せる（言葉ごとにそろえながら探すと 20 倍ほど遅い）
+        var score = Double(keywords.filter { haystack.range(of: $0, options: .literal) != nil }.count)
         if let bundleID, item.pastedApps?.contains(bundleID) == true { score += 3 }
         return score
     }
 
-    /// 作業中の文字から、探すのに使う言葉（日本語も単語に分ける）
-    private static func keywords(in text: String) -> [String] {
+    /// 大文字・小文字と全角・半角をそろえる（SearchText.contains と同じ見方）
+    nonisolated private static func folded(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
+    }
+
+    /// 作業中の文字から、探すのに使う言葉（日本語も単語に分ける。folded でそろえて返す）
+    nonisolated private static func keywords(in text: String) -> [String] {
         let tokenizer = NLTokenizer(unit: .word)
         tokenizer.string = text
         var words: [String] = []
         var seen = Set<String>()
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
-            let word = String(text[range])
-            if word.count >= 2, !word.allSatisfy(\.isNumber), seen.insert(word.lowercased()).inserted { words.append(word) }
+            let word = folded(String(text[range]))
+            if word.count >= 2, !word.allSatisfy(\.isNumber), seen.insert(word).inserted { words.append(word) }
             return words.count < 80
         }
         return words
