@@ -47,6 +47,8 @@ EOF
     fi
     rm -rf "$CERT_DIR"
 fi
+# ExFAT の外付けでは、ファイルの属性が「._」で始まるファイルになり、署名するときに中身の一部とみなされて失敗するので消しておく
+find "$APP" -name '._*' -delete
 if security find-identity -p codesigning | grep -q "Copipe Local Signing"; then
     codesign --force --sign "Copipe Local Signing" "$APP"
 else
@@ -58,6 +60,8 @@ echo "ビルド完了: $APP"
 if [[ "${1:-}" == "install" ]]; then
     rm -rf /Applications/Copipe.app
     cp -R "$APP" /Applications/
+    # 署名したあとにも「._」のファイルができて一緒に写ってくるので、入れた先で消す（残すと署名が合わなくなる）
+    find /Applications/Copipe.app -name '._*' -delete
     # copipe:// のリンクが /Applications のほうで開くように、ビルド用のコピーは登録から外す
     LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
     "$LSREGISTER" -u "$PWD/$APP" 2>/dev/null || true
