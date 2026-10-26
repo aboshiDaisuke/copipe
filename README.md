@@ -83,6 +83,7 @@ open build/Copipe.app
   - 自動で貼り付けられなくなったら、`codesign -dvv /Applications/Copipe.app` の `Authority=` が「Copipe Local Signing」かを見る（`Signature=adhoc` なら仮の署名で、入れ替えるたびに許可が外れる）
   - 許可が付いているかは `open -n -g -W /Applications/Copipe.app --args --suggest-test none.app <[] だけの.json> <書き出し先.txt>` の1行目で分かる
   - 外れていたら、Copipe を終了して `tccutil reset Accessibility jp.daisukeaboshi.copipe` で古い登録を消し、起動し直して許可する
+- macOS 15.4 以降では、ほかのアプリでコピーしたものを Copipe が読むたびに確認が出る。「システム設定 > プライバシーとセキュリティ > ほかのアプリからペースト」で Copipe を「許可」にすると出なくなる（許可したあとは Copipe を起動し直す）。「許可」になっていない間は、履歴の上と設定に案内が出る。`--suggest-test` の書き出しの2行目でも分かる
 - 履歴の保存先: `~/Library/Application Support/Copipe/`（最大2000件と保存期間のどちらかで古いものから消える。ピンボードの項目は数に含めず、消えない）
 - iCloud 同期: 設定の「iCloud で同期する」を、同期したい Mac それぞれでオンにする。iCloud Drive の「Copipe」フォルダに、Mac ごとに自分の分のファイル（`devices/<Mac の番号>.json`）と、画像・丸ごとのデータ（`images/`・`raw/`）を置く。それぞれの Mac は自分のファイルだけを書き、ほかの Mac のファイルは20秒ごとに見に行って取り込む
   - 同じ項目を2台で変えたときは、あとで変えたほうになる。消したものはほかの Mac でも消える（消した記録は90日で忘れる）

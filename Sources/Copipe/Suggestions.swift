@@ -257,7 +257,8 @@ enum SuggestionTest {
             let started = Date()
             let context = app.map(WorkContext.read)
             let picked = await Suggestions.pick(from: items, pinboards: [], context: context)
-            var lines = ["アクセシビリティ: \(AXIsProcessTrusted())", "アプリ: \(context?.appName ?? "なし")",
+            var lines = ["アクセシビリティ: \(AXIsProcessTrusted())", "ほかのアプリからペースト: \(PasteboardAccess.isAllowed)",
+                         "アプリ: \(context?.appName ?? "なし")",
                          "窓: \(context?.windowTitle ?? "")", "入力欄: \(context?.fieldLabel ?? "")",
                          "入力中: \(context?.typing ?? "")", "画面の文字: \(context?.visibleText ?? "")",
                          "秒: \(String(format: "%.1f", Date().timeIntervalSince(started)))", "提案:"]

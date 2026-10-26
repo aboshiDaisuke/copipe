@@ -46,6 +46,7 @@ final class PanelModel: ObservableObject {
     @Published var editNotice: String?
     @Published var showToken = 0
     @Published var accessibilityGranted = true
+    @Published var pasteboardNeedsAllow = false
     @Published var commandHeld = false
     /// ⇧ で範囲を選ぶときの起点
     var anchor = 0
@@ -229,6 +230,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         endEditing()
         model.dragging = nil
         model.accessibilityGranted = Paster.isTrusted
+        model.pasteboardNeedsAllow = PasteboardAccess.needsAllow
         model.commandHeld = false
         model.showToken += 1
 

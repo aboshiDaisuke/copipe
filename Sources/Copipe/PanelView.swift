@@ -29,6 +29,7 @@ struct PanelView: View {
         VStack(spacing: 10) {
             topBar
             if !model.accessibilityGranted && Preferences.pasteToActiveApp { accessibilityBanner }
+            if model.pasteboardNeedsAllow { pasteboardBanner }
             if items.isEmpty {
                 emptyState
             } else {
@@ -232,6 +233,17 @@ struct PanelView: View {
             Text("自動で貼り付けるには「アクセシビリティ」の許可が必要です。今はクリップボードにコピーするだけになります。")
                 .font(.system(size: 12))
             Button("設定を開く", action: onOpenSettings)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var pasteboardBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text("コピーするたびに確認が出ないように、「ほかのアプリからペースト」で Copipe を「許可」にしてください。")
+                .font(.system(size: 12))
+            Button("設定を開く") { PasteboardAccess.openSettings() }
                 .controlSize(.small)
         }
         .padding(.horizontal, 20)

@@ -37,3 +37,24 @@ enum Paster {
         up?.post(tap: .cghidEventTap)
     }
 }
+
+/// ほかのアプリでコピーしたものを読む許可（macOS 15.4 から。「許可」にしておかないと、コピーを記録するたびに確認が出る）
+enum PasteboardAccess {
+    /// システム設定の「ほかのアプリからペースト」で「許可」になっている
+    static var isAllowed: Bool {
+        guard #available(macOS 15.4, *) else { return true }
+        return NSPasteboard.general.accessBehavior == .alwaysAllow
+    }
+
+    /// 一度確認が出て、システム設定に Copipe が並んでいるのに「許可」になっていない
+    static var needsAllow: Bool {
+        guard #available(macOS 15.4, *) else { return false }
+        return [.ask, .alwaysDeny].contains(NSPasteboard.general.accessBehavior)
+    }
+
+    static func openSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Pasteboard") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}

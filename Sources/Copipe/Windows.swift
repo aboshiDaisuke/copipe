@@ -57,6 +57,7 @@ final class SettingsModel: ObservableObject {
     @Published var autoRules = Preferences.autoRules { didSet { Preferences.autoRules = autoRules } }
     @Published var transferMessage: String?
     @Published var accessibilityGranted = Paster.isTrusted
+    @Published var pasteboardAllowed = PasteboardAccess.isAllowed
     @Published var confirmClear = false
     @Published var importMessage: String?
 }
@@ -159,6 +160,19 @@ struct SettingsView: View {
                         Label("許可済み", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                     } else {
                         Button("許可する…") { Paster.openAccessibilitySettings() }
+                    }
+                }
+
+                // 「許可」でないと、ほかのアプリでコピーするたびに確認が出る
+                if #available(macOS 15.4, *) {
+                    HStack {
+                        Text("ほかのアプリからペースト")
+                        Spacer()
+                        if model.pasteboardAllowed {
+                            Label("許可済み", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        } else {
+                            Button("許可する…") { PasteboardAccess.openSettings() }
+                        }
                     }
                 }
             }
@@ -298,6 +312,7 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.accessibilityGranted = Paster.isTrusted
+            model.pasteboardAllowed = PasteboardAccess.isAllowed
         }
         .confirmationDialog("履歴を消去しますか？", isPresented: $model.confirmClear) {
             Button("消去", role: .destructive) { store.clearHistory() }
