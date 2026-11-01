@@ -346,13 +346,20 @@ final class ClipboardStore: ObservableObject {
         if let raw = loadRaw(of: item), !(plainText && item.text != nil) {
             // コピーしたときのデータを全形式そのまま戻す
             write(raw, to: pb)
+            // ターミナル（Claude Code など）は画像を PNG で探すので、PNG がなければ足しておく
+            if item.kind == .image, pb.availableType(from: [.png]) == nil,
+               let url = imageURL(for: item), let png = try? Data(contentsOf: url) {
+                pb.addTypes([.png], owner: nil)
+                pb.setData(png, forType: .png)
+            }
             return
         }
         switch item.kind {
         case .text, .link:
             pb.setString(item.text ?? "", forType: .string)
         case .image:
-            if let image = image(for: item) { pb.writeObjects([image]) }
+            // PNG と TIFF の両方を入れる（ターミナルの Claude Code などは PNG を読む）
+            pb.writeObjects(pasteboardItems(for: item))
         case .file:
             pb.writeObjects((item.filePaths ?? []).map { NSURL(fileURLWithPath: $0) })
         case .other:

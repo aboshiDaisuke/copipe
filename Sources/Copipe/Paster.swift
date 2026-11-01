@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
 
-/// 前面のアプリに ⌘V を送って貼り付ける（アクセシビリティ許可が必要）
+/// 前面のアプリに ⌘V（ターミナルへの画像は ⌃V）を送って貼り付ける（アクセシビリティ許可が必要）
 enum Paster {
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -24,13 +24,33 @@ enum Paster {
         event.cgEvent?.getIntegerValueField(.eventSourceUserData) == marker
     }
 
-    static func sendCommandV() {
+    /// ターミナルのアプリ。この中の Claude Code などは、画像を ⌘V ではなく ⌃V で受け取る
+    /// （VS Code はエディタにも同じ ⌘V が届き、ターミナルかどうか見分けられないので入れない）
+    private static let terminalApps: Set<String> = [
+        "com.mitchellh.ghostty",
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "dev.warp.Warp-Stable",
+        "com.github.wez.wezterm",
+        "org.alacritty",
+        "net.kovidgoyal.kitty",
+    ]
+
+    /// 貼るのが画像だけで、貼る先がターミナルなら ⌃V にする
+    static func usesControlV(for items: [ClipItem], into app: NSRunningApplication?) -> Bool {
+        guard let id = app?.bundleIdentifier, terminalApps.contains(id) else { return false }
+        return !items.isEmpty && items.allSatisfy { $0.kind == .image }
+    }
+
+    /// 貼り付けのキーを送る。control が true なら ⌃V、そうでなければ ⌘V
+    static func sendPaste(control: Bool = false) {
         let source = CGEventSource(stateID: .combinedSessionState)
         let key = CGKeyCode(kVK_ANSI_V)
         let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
         let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
-        down?.flags = .maskCommand
-        up?.flags = .maskCommand
+        let flags: CGEventFlags = control ? .maskControl : .maskCommand
+        down?.flags = flags
+        up?.flags = flags
         down?.setIntegerValueField(.eventSourceUserData, value: marker)
         up?.setIntegerValueField(.eventSourceUserData, value: marker)
         down?.post(tap: .cghidEventTap)

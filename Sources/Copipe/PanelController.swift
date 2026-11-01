@@ -372,8 +372,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         store.recordPaste(list, into: targetApp?.bundleIdentifier)
         Sound.pasted()
+        let control = Paster.usesControlV(for: list, into: targetApp)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            Paster.sendCommandV()
+            Paster.sendPaste(control: control)
             self.onPasted?()
         }
     }
@@ -400,7 +401,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         store.recordPaste(list, into: targetApp?.bundleIdentifier)
         Sound.pasted()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            Paster.sendCommandV()
+            Paster.sendPaste()
             self.onPasted?()
         }
     }
